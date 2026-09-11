@@ -1,0 +1,9 @@
+#!/bin/bash
+# df stub: logs the call, sleeps $STUB_DIR/df.sleep seconds (if the file exists),
+# prints $STUB_DIR/df.out and exits with the code from $STUB_DIR/df.rc (0 by default).
+echo "df $*" >> "$STUB_DIR/calls.log"
+if [[ -f $STUB_DIR/df.sleep ]]; then
+    sleep "$(< "$STUB_DIR/df.sleep")"
+fi
+cat "$STUB_DIR/df.out"
+exit "$(cat "$STUB_DIR/df.rc" 2> /dev/null || echo 0)"

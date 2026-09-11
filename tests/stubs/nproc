@@ -1,0 +1,3 @@
+#!/bin/bash
+# nproc stub: prints the content of $STUB_DIR/nproc.
+cat "$STUB_DIR/nproc"

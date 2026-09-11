@@ -1,0 +1,7 @@
+#!/bin/bash
+# apt-get stub: logs the call; "install" puts a link to the real curl into $STUB_BIN.
+echo "apt-get $*" >> "$STUB_DIR/calls.log"
+if [[ $1 == install ]]; then
+    ln -sf "$REAL_CURL" "$STUB_BIN/curl"
+fi
+exit 0
