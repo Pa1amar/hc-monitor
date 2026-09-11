@@ -80,3 +80,12 @@ test_run_via_sh_asks_for_bash() {
     assert_rc 2
     assert_contains "$ERR" "Run with bash"
 }
+
+test_invalid_port_in_config_exits_2() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22 db.local:5432"'
+    run_script
+    assert_rc 2
+    assert_contains "$ERR" "invalid port in"
+    assert_contains "$ERR" "db.local:5432"
+    assert_requests ""
+}

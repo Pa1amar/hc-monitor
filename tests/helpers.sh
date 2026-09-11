@@ -39,6 +39,8 @@ setup() {
         > "$ROOT_DIR/proc/meminfo"
     echo "0.10 0.20 0.30 1/100 1234" > "$ROOT_DIR/proc/loadavg"
     set_df ' 45%   12% ext4     /'
+    set_ss tcp
+    set_ss udp
     echo 4 > "$STUB_DIR/nproc"
     : > "$STUB_DIR/services"
     : > "$CALLS"
@@ -50,6 +52,19 @@ setup() {
 # set_df <line>... — output of the df stub; the header is added automatically.
 set_df() {
     { echo "Use% IUse% Type     Mounted on"; printf '%s\n' "$@"; } > "$STUB_DIR/df.out"
+}
+
+# set_ss <tcp|udp> [address:port]... — listening sockets reported by the ss stub; the header is added.
+set_ss() {
+    local proto="$1" state=LISTEN addr
+    shift
+    [[ $proto == udp ]] && state=UNCONN
+    {
+        echo "State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
+        for addr in "$@"; do
+            echo "$state 0      128    $addr 0.0.0.0:*"
+        done
+    } > "$STUB_DIR/ss_$proto.out"
 }
 
 write_conf() {

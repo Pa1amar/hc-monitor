@@ -12,7 +12,7 @@ Each report is stored in the check's event log (open the check → Events → cl
 
 ## Requirements
 
-- Ubuntu (or another Linux) with systemd, bash 4.4+ and GNU coreutils
+- Ubuntu (or another Linux) with systemd, bash 4.4+, GNU coreutils and `ss` from iproute2 — all preinstalled on Ubuntu
 - `curl` — the installer offers to install it with apt if it's missing
 - root access (`sudo`)
 - a check on healthchecks.io — **one check per server**: if two servers ping the same check, a live server hides a dead one
@@ -41,6 +41,7 @@ Each report is stored in the check's event log (open the check → Events → cl
    The installer asks for:
    - the ping URL;
    - the systemd services to watch, space-separated (for example `nginx postgresql`), or Enter for none — names that don't exist are rejected;
+   - the local ports to watch, space-separated (for example `22 443 53/udp`; a bare number means TCP), or Enter for none;
    - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core).
 
    Then it shows the report, sends the first ping through the systemd unit and enables the timer. If the first ping fails, it prints `systemctl status hc-monitor.service` and leaves the timer off, so you can fix the cause and run `install` again.
@@ -59,6 +60,7 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 | Memory | used ≥ `MEM_MAX_PCT` | based on `MemAvailable`, so page cache doesn't count as used |
 | CPU load | 15-minute load average ≥ CPU cores × `LOAD_MAX_PER_CPU` | the long window ignores short spikes |
 | Services | a listed unit is not `active` or `reloading` | a unit that doesn't exist is reported separately, so a typo doesn't look like a crash |
+| Ports | a listed local TCP or UDP port has no listening socket | checked with `ss` on any local address; `443` means TCP, `53/udp` means UDP |
 
 A check that can't run — for example `df` hanging for more than 10 seconds — is reported as a problem too, never skipped silently.
 
@@ -74,6 +76,7 @@ Disk /var: 93% (inodes 30%)
 RAM: 52% used of 7983 MiB
 Load (1/5/15 min): 0.52 0.58 0.59, CPUs: 4
 Services: nginx=active, postgresql=active
+Ports: 22/tcp=listening, 443/tcp=listening
 ```
 
 A clean report starts with `All good`.
@@ -85,7 +88,7 @@ A clean report starts with `All good`.
 | `sudo hc-monitor.sh --dry-run` | run the checks and print the report without sending it |
 | `journalctl -u hc-monitor` | logs: one line per run |
 | `systemctl list-timers hc-monitor.timer` | when the next run is |
-| `sudo hc-monitor.sh install` | change the URL, services or thresholds; current values are offered as defaults |
+| `sudo hc-monitor.sh install` | change the URL, services, ports or thresholds; current values are offered as defaults |
 | `sudo hc-monitor.sh uninstall` | remove everything, after a confirmation |
 
 After uninstalling, pause or delete the check in healthchecks.io — otherwise it alerts when the pings stop.
@@ -114,6 +117,7 @@ sudo bash hc-monitor.sh install
 ```bash
 HC_PING_URL="https://hc-ping.com/<uuid>"
 SERVICES="nginx postgresql"
+PORTS="22 443 53/udp"
 DISK_MAX_PCT="90"
 MEM_MAX_PCT="90"
 LOAD_MAX_PER_CPU="2"
