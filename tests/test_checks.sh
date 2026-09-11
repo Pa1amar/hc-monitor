@@ -138,3 +138,67 @@ test_real_environment_report() {
     assert_not_contains "$OUT" "df failed"
     assert_not_contains "$OUT" "df returned no data"
 }
+
+test_no_ports_configured() {
+    run_script --dry-run
+    assert_contains "$OUT" "Ports: none"
+    assert_not_contains "$CALLS" "ss -l"
+}
+
+test_listening_tcp_ports_in_any_address_format() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22 443 80 53"'
+    set_ss tcp '0.0.0.0:22' '[::]:443' '*:80' '127.0.0.53%lo:53'
+    run_script --dry-run
+    assert_contains "$OUT" "All good"
+    assert_contains "$OUT" "Ports: 22/tcp=listening, 443/tcp=listening, 80/tcp=listening, 53/tcp=listening"
+}
+
+test_tcp_port_not_listening_goes_to_fail() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22 8080/tcp"'
+    set_ss tcp '0.0.0.0:22'
+    run_script
+    assert_rc 0
+    assert_requests "POST /test-uuid/fail"
+    assert_contains "$BODY" "- Port 8080/tcp: not listening"
+    assert_contains "$BODY" "Ports: 22/tcp=listening, 8080/tcp=not-listening"
+}
+
+test_udp_ports() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="53/udp 51820/udp"'
+    set_ss udp '127.0.0.53%lo:53'
+    run_script --dry-run
+    assert_contains "$OUT" "- Port 51820/udp: not listening"
+    assert_contains "$OUT" "Ports: 53/udp=listening, 51820/udp=not-listening"
+}
+
+test_bare_port_means_tcp() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="443"'
+    set_ss udp '0.0.0.0:443'
+    run_script --dry-run
+    assert_contains "$OUT" "- Port 443/tcp: not listening"
+}
+
+test_ss_failure_marks_ports_unknown() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22 443"'
+    echo 1 > "$STUB_DIR/ss.rc"
+    run_script --dry-run
+    assert_contains "$OUT" "PROBLEMS (1):"
+    assert_contains "$OUT" "- Ports: cannot list tcp sockets: exit code 1"
+    assert_contains "$OUT" "Ports: 22/tcp=unknown, 443/tcp=unknown"
+    assert_not_contains "$OUT" "not listening"
+}
+
+test_ss_error_with_exit_code_0_is_a_failure() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22"'
+    echo "Cannot open netlink socket: Protocol not supported" > "$STUB_DIR/ss.err"
+    run_script --dry-run
+    assert_contains "$OUT" "- Ports: cannot list tcp sockets: Cannot open netlink socket: Protocol not supported"
+    assert_contains "$OUT" "Ports: 22/tcp=unknown"
+}
+
+test_ss_is_queried_once_per_needed_protocol() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22 443/tcp"'
+    run_script --dry-run
+    [[ $(grep -cx "ss -ltn" "$CALLS") == 1 ]] || fail "ss -ltn must be called exactly once"
+    assert_not_contains "$CALLS" "ss -lun"
+}

@@ -38,6 +38,7 @@ readonly DF_TIMEOUT=10
 # Defaults; /etc/hc-monitor.conf overrides them.
 HC_PING_URL=""
 SERVICES=""
+PORTS=""
 DISK_MAX_PCT=90
 MEM_MAX_PCT=90
 LOAD_MAX_PER_CPU=2
@@ -78,6 +79,10 @@ valid_service() {
     [[ $1 =~ ^[A-Za-z0-9@._:-]+$ ]]
 }
 
+valid_port() {
+    [[ $1 =~ ^([1-9][0-9]{0,4})(/(tcp|udp))?$ ]] && (( BASH_REMATCH[1] <= 65535 ))
+}
+
 load_config() {
     [[ -e $CONF_FILE ]] || return 0
     [[ -r $CONF_FILE ]] || die 2 "cannot read $CONF_FILE, run with sudo"
@@ -90,7 +95,7 @@ load_config() {
 
 validate_config() {
     local -a list
-    local svc
+    local svc entry
     [[ -n $HC_PING_URL ]] || die 2 "HC_PING_URL is not set, run install"
     valid_url "$HC_PING_URL" || die 2 "invalid HC_PING_URL in $CONF_FILE"
     valid_pct "$DISK_MAX_PCT" || die 2 "invalid DISK_MAX_PCT in $CONF_FILE: $DISK_MAX_PCT"
@@ -99,6 +104,10 @@ validate_config() {
     read -ra list <<< "$SERVICES"
     for svc in "${list[@]}"; do
         valid_service "$svc" || die 2 "invalid service name in $CONF_FILE: $svc"
+    done
+    read -ra list <<< "$PORTS"
+    for entry in "${list[@]}"; do
+        valid_port "$entry" || die 2 "invalid port in $CONF_FILE: $entry"
     done
 }
 
@@ -202,6 +211,57 @@ check_services() {
     summary "Services: $(join_by ', ' "${items[@]}")"
 }
 
+# list_listening <tcp|udp>: sets LISTENING to " port port ... " and returns 0,
+# or sets SS_ERROR and returns 1 when ss fails (non-zero exit or anything on stderr).
+list_listening() {
+    local flag=-ltn errfile out rc=0
+    [[ $1 == udp ]] && flag=-lun
+    errfile=$(mktemp) || { SS_ERROR="cannot create a temporary file"; return 1; }
+    out=$(ss "$flag" 2> "$errfile") || rc=$?
+    SS_ERROR=""
+    read -r SS_ERROR < "$errfile"
+    rm -f "$errfile"
+    if (( rc != 0 )) || [[ -n $SS_ERROR ]]; then
+        SS_ERROR=${SS_ERROR:-exit code $rc}
+        return 1
+    fi
+    LISTENING=$(awk 'NR > 1 { n = split($4, a, ":"); printf " %s", a[n] } END { printf " " }' <<< "$out")
+}
+
+check_ports() {
+    local -a list items=()
+    local -A listening=() failed=()
+    local entry port proto state
+    read -ra list <<< "$PORTS"
+    if (( ${#list[@]} == 0 )); then
+        summary "Ports: none"
+        return
+    fi
+    for entry in "${list[@]}"; do
+        port=${entry%/*}
+        proto=tcp
+        [[ $entry == */udp ]] && proto=udp
+        if [[ -z ${listening[$proto]+set} && -z ${failed[$proto]+set} ]]; then
+            if list_listening "$proto"; then
+                listening[$proto]=$LISTENING
+            else
+                failed[$proto]=1
+                problem "Ports: cannot list $proto sockets: $SS_ERROR"
+            fi
+        fi
+        if [[ -n ${failed[$proto]+set} ]]; then
+            state=unknown
+        elif [[ ${listening[$proto]} == *" $port "* ]]; then
+            state=listening
+        else
+            state=not-listening
+            problem "Port $port/$proto: not listening"
+        fi
+        items+=("$port/$proto=$state")
+    done
+    summary "Ports: $(join_by ', ' "${items[@]}")"
+}
+
 run_checks() {
     PROBLEMS=()
     SUMMARY=()
@@ -209,6 +269,7 @@ run_checks() {
     check_memory
     check_load
     check_services
+    check_ports
 }
 
 build_report() {
@@ -336,6 +397,30 @@ ask_services() {
     done
 }
 
+ask_ports() {
+    local -a list
+    local entry ok
+    while true; do
+        ask "Local ports to watch, space-separated: 443 or 443/tcp for TCP, 53/udp for UDP (Enter keeps the list, - for none) [${PORTS:-none}]: "
+        case $ANSWER in
+            -) PORTS=""; return 0 ;;
+            "") read -ra list <<< "$PORTS" ;;
+            *) read -ra list <<< "$ANSWER" ;;
+        esac
+        ok=1
+        for entry in "${list[@]}"; do
+            if ! valid_port "$entry"; then
+                echo "Invalid port: $entry (expected 443, 443/tcp or 53/udp)." >&2
+                ok=0
+            fi
+        done
+        if (( ok )); then
+            PORTS="${list[*]}"
+            return 0
+        fi
+    done
+}
+
 ask_settings() {
     echo "One ping URL per server: create a separate healthchecks.io check for each server." >&2
     ask_valid "healthchecks.io ping URL" "$HC_PING_URL" valid_url \
@@ -345,6 +430,7 @@ ask_settings() {
         HC_PING_URL="${HC_PING_URL%/}"
     done
     ask_services
+    ask_ports
     if confirm "Thresholds: disk $DISK_MAX_PCT%, RAM $MEM_MAX_PCT%, load $LOAD_MAX_PER_CPU per CPU. Change them? [y/N] " n; then
         ask_valid "Disk and inode threshold, %" "$DISK_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
         DISK_MAX_PCT="$ANSWER"
@@ -364,6 +450,7 @@ write_config() {
 # hc-monitor settings. Change them with: sudo $INSTALLED_PATH install (or edit this file).
 HC_PING_URL="$HC_PING_URL"
 SERVICES="$SERVICES"
+PORTS="$PORTS"
 DISK_MAX_PCT="$DISK_MAX_PCT"
 MEM_MAX_PCT="$MEM_MAX_PCT"
 LOAD_MAX_PER_CPU="$LOAD_MAX_PER_CPU"
