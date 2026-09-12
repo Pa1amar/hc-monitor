@@ -89,3 +89,17 @@ test_invalid_port_in_config_exits_2() {
     assert_contains "$ERR" "db.local:5432"
     assert_requests ""
 }
+
+test_invalid_port_on_second_line_exits_2() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'PORTS="22' 'db.local:5432"'
+    run_script
+    assert_rc 2
+    assert_contains "$ERR" "invalid port in"
+}
+
+test_invalid_cpu_threshold_in_config_exits_2() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'CPU_MAX_PCT="high"'
+    run_script
+    assert_rc 2
+    assert_contains "$ERR" "invalid CPU_MAX_PCT"
+}

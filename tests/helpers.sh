@@ -31,7 +31,7 @@ setup() {
     TEST_PATH="$T/bin:/usr/local/bin:/usr/bin:/bin"
     RUN_SCRIPT="$SCRIPT"
     unset INPUT
-    mkdir -p "$ROOT_DIR/etc/systemd/system" "$ROOT_DIR/proc" "$ROOT_DIR/run/systemd/system" \
+    mkdir -p "$ROOT_DIR/etc/systemd/system" "$ROOT_DIR/proc/net" "$ROOT_DIR/run/systemd/system" \
         "$STUB_DIR" "$T/bin"
     cp "$TESTS_DIR"/stubs/* "$T/bin/"
     chmod +x "$T/bin/"*
@@ -39,8 +39,10 @@ setup() {
         > "$ROOT_DIR/proc/meminfo"
     echo "0.10 0.20 0.30 1/100 1234" > "$ROOT_DIR/proc/loadavg"
     set_df ' 45%   12% ext4     /'
-    set_ss tcp
-    set_ss udp
+    set_listen tcp
+    set_listen udp
+    set_cpu 1000 0 500 8000 100 0 0 0          # total 9600, idle 8000, iowait 100, steal 0
+    set_cpu_state 300 8600 7250 100 0          # 5 minutes ago: 25% busy since then
     echo 4 > "$STUB_DIR/nproc"
     : > "$STUB_DIR/services"
     : > "$CALLS"
@@ -54,17 +56,48 @@ set_df() {
     { echo "Use% IUse% Type     Mounted on"; printf '%s\n' "$@"; } > "$STUB_DIR/df.out"
 }
 
-# set_ss <tcp|udp> [address:port]... — listening sockets reported by the ss stub; the header is added.
-set_ss() {
-    local proto="$1" state=LISTEN addr
+# set_listen <tcp|udp> [port]... — /proc/net/<proto> in the kernel format with a listening IPv4
+# socket per port (state 0A for tcp, 07 for udp); /proc/net/<proto>6 gets only its header.
+set_listen() {
+    local proto="$1" state=0A port i=0
     shift
-    [[ $proto == udp ]] && state=UNCONN
+    [[ $proto == udp ]] && state=07
     {
-        echo "State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
-        for addr in "$@"; do
-            echo "$state 0      128    $addr 0.0.0.0:*"
+        echo "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
+        for port in "$@"; do
+            printf '%4d: 00000000:%04X 00000000:0000 %s 00000000:00000000 00:00000000 00000000     0        0 %d 1 0000000000000000 100 0 0 10 0\n' \
+                "$i" "$port" "$state" "$((20000 + i))"
+            i=$((i + 1))
         done
-    } > "$STUB_DIR/ss_$proto.out"
+    } > "$ROOT_DIR/proc/net/$proto"
+    echo "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode" \
+        > "$ROOT_DIR/proc/net/${proto}6"
+}
+
+# add_socket <table> <local address:port in hex> <state> — appends one socket to /proc/net/<table>.
+add_socket() {
+    printf '  99: %s 00000000:0000 %s 00000000:00000000 00:00000000 00000000     0        0 30000 1 0000000000000000 100 0 0 10 0\n' \
+        "$2" "$3" >> "$ROOT_DIR/proc/net/$1"
+}
+
+# set_cpu <user nice system idle iowait irq softirq steal> — the first line of /proc/stat.
+set_cpu() {
+    echo "cpu  $* 0 0" > "$ROOT_DIR/proc/stat"
+}
+
+# set_cpu_state <seconds ago> <total idle iowait steal> — the CPU sample saved by the previous run.
+set_cpu_state() {
+    local now
+    printf -v now '%(%s)T' -1
+    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
+    echo "$((now - $1)) $2 $3 $4 $5" > "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
+}
+
+# use_sleep_stub <user nice system idle iowait irq softirq steal> — `sleep` rewrites /proc/stat
+# with these counters and returns at once, so the one-second CPU sample is instant and exact.
+use_sleep_stub() {
+    printf '#!/bin/bash\necho "cpu  %s 0 0" > "%s/proc/stat"\n' "$*" "$ROOT_DIR" > "$T/bin/sleep"
+    chmod +x "$T/bin/sleep"
 }
 
 write_conf() {
