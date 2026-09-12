@@ -4,8 +4,8 @@
 test_install_fresh() {
     rm "$ROOT_DIR/etc/hc-monitor.conf"
     printf 'nginx active\n' > "$STUB_DIR/services"
-    set_ss tcp '0.0.0.0:22'
-    set_ss udp '0.0.0.0:53'
+    set_listen tcp 22
+    set_listen udp 53
     INPUT=$'https://hc-ping.com/new-check\nnginx\n22 53/udp\n'   # URL, services, ports; thresholds: Enter
     run_script install
     assert_rc 0
@@ -17,6 +17,7 @@ test_install_fresh() {
     assert_contains "$conf" 'DISK_MAX_PCT="90"'
     assert_contains "$conf" 'MEM_MAX_PCT="90"'
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="2"'
+    assert_contains "$conf" 'CPU_MAX_PCT="90"'
     assert_mode "$ROOT_DIR/usr/local/bin/hc-monitor.sh" 700
     cmp -s "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh" || fail "the installed copy differs from the original"
     assert_mode "$units/hc-monitor.service" 644
@@ -32,6 +33,7 @@ test_install_fresh() {
     assert_contains "$OUT" "The report will look like this:"
     assert_contains "$OUT" "Services: nginx=active"
     assert_contains "$OUT" "Ports: 22/tcp=listening, 53/udp=listening"
+    assert_contains "$OUT" "CPU: 25% busy over 5 min"
     assert_contains "$OUT" "First report sent."
     assert_contains "$OUT" "Period: 5 minutes, Grace Time: 10 minutes"
 }
@@ -59,7 +61,7 @@ test_install_reprompts_bad_url_and_unknown_service() {
 }
 
 test_install_changes_thresholds() {
-    INPUT=$'\n\n\ny\n101\n85\n80\n0\n1.5\n'
+    INPUT=$'\n\n\ny\n101\n85\n80\n0\n1.5\n95\n'
     run_script install
     assert_rc 0
     assert_contains "$ERR" "Expected a whole number from 1 to 100."
@@ -68,11 +70,12 @@ test_install_changes_thresholds() {
     assert_contains "$conf" 'DISK_MAX_PCT="85"'
     assert_contains "$conf" 'MEM_MAX_PCT="80"'
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="1.5"'
+    assert_contains "$conf" 'CPU_MAX_PCT="95"'
 }
 
 test_reinstall_keeps_current_values() {
     write_conf 'HC_PING_URL="http://127.0.0.1:1/keep"' 'SERVICES="cron"' 'PORTS="22"' \
-        'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' 'LOAD_MAX_PER_CPU="3"'
+        'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' 'LOAD_MAX_PER_CPU="3"' 'CPU_MAX_PCT="80"'
     printf 'cron active\n' > "$STUB_DIR/services"
     INPUT=$'\n\n\n'
     run_script install
@@ -84,6 +87,19 @@ test_reinstall_keeps_current_values() {
     assert_contains "$conf" 'DISK_MAX_PCT="70"'
     assert_contains "$conf" 'MEM_MAX_PCT="75"'
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="3"'
+    assert_contains "$conf" 'CPU_MAX_PCT="80"'
+}
+
+test_upgrade_from_config_without_new_keys() {
+    # A config written before PORTS and CPU_MAX_PCT existed.
+    write_conf 'HC_PING_URL="http://127.0.0.1:1/old"' 'SERVICES=""' 'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"'
+    INPUT=$'\n\n\n'
+    run_script install
+    assert_rc 0
+    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    assert_contains "$conf" 'PORTS=""'
+    assert_contains "$conf" 'CPU_MAX_PCT="90"'
+    assert_contains "$conf" 'DISK_MAX_PCT="70"'
 }
 
 test_install_dash_clears_services() {
@@ -180,10 +196,11 @@ test_uninstall_yes_removes_everything() {
     run_script uninstall
     assert_rc 0
     local f
-    for f in etc/hc-monitor.conf usr/local/bin/hc-monitor.sh \
+    for f in etc/hc-monitor.conf usr/local/bin/hc-monitor.sh var/lib/hc-monitor/cpu.stat \
         etc/systemd/system/hc-monitor.service etc/systemd/system/hc-monitor.timer; do
         [[ ! -e $ROOT_DIR/$f ]] || fail "/$f was not removed"
     done
+    [[ ! -d $ROOT_DIR/var/lib/hc-monitor ]] || fail "/var/lib/hc-monitor was not removed"
     assert_calls_in_order "systemctl disable --now hc-monitor.timer" "systemctl daemon-reload" \
         "systemctl reset-failed hc-monitor.service"
     assert_contains "$OUT" "pause or delete the check in healthchecks.io"
