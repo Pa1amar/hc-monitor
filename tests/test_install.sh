@@ -24,7 +24,7 @@ test_install_fresh() {
     assert_mode "$units/hc-monitor.timer" 644
     assert_contains "$units/hc-monitor.service" "Type=oneshot"
     assert_contains "$units/hc-monitor.service" "ExecStart=/usr/local/bin/hc-monitor.sh"
-    assert_contains "$units/hc-monitor.service" "TimeoutStartSec=2min"
+    assert_contains "$units/hc-monitor.service" "TimeoutStartSec=4min"
     assert_contains "$units/hc-monitor.timer" "OnCalendar=*:0/5"
     assert_contains "$units/hc-monitor.timer" "WantedBy=timers.target"
     assert_calls_in_order "systemctl daemon-reload" "systemctl start hc-monitor.service" \
@@ -36,6 +36,7 @@ test_install_fresh() {
     assert_contains "$OUT" "CPU: 25% busy over 5 min"
     assert_contains "$OUT" "First report sent."
     assert_contains "$OUT" "Period: 5 minutes, Grace Time: 10 minutes"
+    assert_contains "$OUT" "Add a service: sudo /usr/local/bin/hc-monitor.sh add <name>"
 }
 
 test_install_requires_url_when_none_is_configured() {
@@ -143,7 +144,7 @@ test_install_warns_when_report_has_problems() {
     INPUT=$'\n\n\n'
     run_script install
     assert_rc 0
-    assert_contains "$OUT" "Warning: the report lists problems, so the first ping goes to /fail and healthchecks.io will send an alert."
+    assert_contains "$OUT" "Warning: a report lists problems, so its first ping goes to /fail and healthchecks.io will send an alert."
 }
 
 test_install_first_report_failure_keeps_timer_off() {

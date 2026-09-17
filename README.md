@@ -10,6 +10,8 @@ Every 5 minutes a systemd timer runs the script. It checks disk space and inodes
 
 Each report is stored in the check's event log (open the check → Events → click an event).
 
+A service can also get a file of its own with its units, ports and HTTP health endpoint, reported to a separate check — see [Services](#services).
+
 ## Requirements
 
 - Ubuntu (or another Linux) with systemd, bash 4.4+ and GNU coreutils
@@ -91,17 +93,57 @@ Ports: 22/tcp=listening, 443/tcp=listening
 
 A clean report starts with `All good`.
 
+## Services
+
+A service can get a file of its own with its systemd units, local ports and HTTP health endpoint, and report them to a separate healthchecks.io check. healthchecks.io only alerts when a check changes state: while the server check is already down (say, because of high load), a service that crashes on the same check raises no new alert — on a check of its own it does.
+
+```bash
+sudo hc-monitor.sh add nym-gateway      # asks for the settings; run it again to change them
+sudo hc-monitor.sh remove nym-gateway
+```
+
+The settings are stored in `/root/.healthchecks/<name>/.env`, and you can write the file by hand too:
+
+```bash
+HC_PING_URL="https://hc-ping.com/<uuid>"        # the service's own check; empty: report with the server
+SERVICES="nym-node"
+PORTS="1789 8080 9000"
+HTTP_URL="http://localhost:8080/api/v1/health"
+HTTP_EXPECT='"status" *: *"up"'                 # the response must match this regular expression
+```
+
+- Set at least one of `SERVICES`, `PORTS` and `HTTP_URL`; they are checked like the server settings.
+- `HTTP_URL` must answer with a 2xx status within 10 seconds (redirects are followed). `HTTP_EXPECT` is an optional extended regular expression; without it any 2xx response is fine.
+- With `HC_PING_URL`, the service sends its own report (to `/fail` when it lists problems), so give that check the same schedule: Period 5 minutes, Grace Time 10 minutes. It must be a different check from the server's. Without `HC_PING_URL`, the service's lines go into the server report, prefixed with `[<name>]`.
+- The file is a shell script that runs as root on every check, so the file and its directories must belong to root and not be writable by group or others. A file that breaks this rule, fails to load or has invalid settings is skipped and reported as a problem in the server report.
+- The next run picks up new and changed files, and `sudo hc-monitor.sh --dry-run` shows every report. `uninstall` keeps these files.
+
+Example report of a service with its own check:
+
+```
+PROBLEMS (1):
+- Port 9000/tcp: not listening
+
+Host: node-1
+Service: nym-gateway
+Services: nym-node=active
+Ports: 1789/tcp=listening, 8080/tcp=listening, 9000/tcp=not-listening
+HTTP http://localhost:8080/api/v1/health: 200, expected text found
+```
+
 ## Everyday commands
 
 | Command | What it does |
 |---|---|
-| `sudo hc-monitor.sh --dry-run` | run the checks and print the report without sending it |
-| `journalctl -u hc-monitor` | logs: one line per run |
+| `sudo hc-monitor.sh --dry-run` | run the checks and print the reports without sending them |
+| `journalctl -u hc-monitor` | logs: one line per report on every run |
 | `systemctl list-timers hc-monitor.timer` | when the next run is |
+| `sudo hc-monitor.sh add <name>` | add a service or change its settings |
+| `sudo hc-monitor.sh remove <name>` | remove a service, after a confirmation |
 | `sudo hc-monitor.sh install` | change the URL, services, ports or thresholds; current values are offered as defaults |
-| `sudo hc-monitor.sh uninstall` | remove everything, after a confirmation |
+| `sudo hc-monitor.sh uninstall` | remove everything except service files, after a confirmation |
 
-After uninstalling, pause or delete the check in healthchecks.io — otherwise it alerts when the pings stop.
+After uninstalling, pause or delete the check in healthchecks.io, and the checks of your services — otherwise they alert when the pings stop.
 
 ## Updating
 
@@ -122,6 +164,7 @@ sudo bash hc-monitor.sh install
 | `/etc/systemd/system/hc-monitor.service` | 644 | oneshot unit that runs the script |
 | `/etc/systemd/system/hc-monitor.timer` | 644 | runs the unit every 5 minutes (`OnCalendar=*:0/5`) |
 | `/var/lib/hc-monitor/cpu.stat` | 644 | CPU counters from the previous run, for the average |
+| `/root/.healthchecks/<name>/.env` | 600 | settings of a service, written by `add` (kept by `uninstall`) |
 
 `/etc/hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits:
 
@@ -141,9 +184,9 @@ To automate the setup, write this file first and then answer every installer que
 
 | Code | Meaning |
 |---|---|
-| 0 | report delivered (even if it lists problems), dry run done, install or uninstall done |
-| 1 | report not delivered, installation failed, input aborted |
-| 2 | bad arguments, no ping URL, unreadable or invalid config, not run with bash |
+| 0 | every report delivered (even if they list problems), dry run done, install, uninstall, add or remove done or cancelled |
+| 1 | a report not delivered, installation failed, input aborted, no such service |
+| 2 | bad arguments or service name, no ping URL, unreadable or invalid config, not run with bash |
 
 ## Tests
 
