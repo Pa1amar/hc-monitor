@@ -48,7 +48,7 @@ setup() {
     : > "$CALLS"
     write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\""
     : > "$SERVER_DIR/requests.log"
-    rm -f "$BODY" "$SERVER_DIR/status"
+    rm -rf "$BODY" "$SERVER_DIR"/status* "$SERVER_DIR"/response* "$SERVER_DIR/bodies"
 }
 
 # set_df <line>... — output of the df stub; the header is added automatically.
@@ -104,6 +104,29 @@ write_conf() {
     printf '%s\n' "$@" > "$ROOT_DIR/etc/hc-monitor.conf"
 }
 
+# add_service <name> <line>... — writes <root home>/.healthchecks/<name>/.env (directories 700, file 600).
+add_service() {
+    local dir="$ROOT_DIR/root/.healthchecks/$1"
+    shift
+    mkdir -p "$dir"
+    chmod 700 "$ROOT_DIR/root/.healthchecks" "$dir"
+    printf '%s\n' "$@" > "$dir/.env"
+    chmod 600 "$dir/.env"
+}
+
+# set_response <path> <status> [body] — how the receiver answers requests to <path>.
+set_response() {
+    echo "$2" > "$SERVER_DIR/status${1//\//_}"
+    if (( $# > 2 )); then
+        printf '%s' "$3" > "$SERVER_DIR/response${1//\//_}"
+    fi
+}
+
+# body_of <path> — the file with the body of the last request to <path>.
+body_of() {
+    echo "$SERVER_DIR/bodies/${1//\//_}"
+}
+
 # A directory with only the commands the script needs, without curl; switches TEST_PATH to it.
 make_path_without_curl() {
     local c
@@ -145,11 +168,12 @@ assert_not_contains() {
     ! grep -qF -- "$2" "$1" 2> /dev/null || fail "${1##*/} unexpectedly contains: $2"
 }
 
-# assert_requests "POST /test-uuid" — the full list of requests to the receiver, one per line.
+# assert_requests "POST /a" — every request to the receiver, one per line, in any order.
 assert_requests() {
-    local actual
-    actual=$(cat "$SERVER_DIR/requests.log")
-    [[ $actual == "$1" ]] || fail "requests to the receiver: '$actual', expected: '$1'"
+    local actual expected
+    actual=$(sort "$SERVER_DIR/requests.log")
+    expected=$(printf '%s\n' "$1" | sort)
+    [[ $actual == "$expected" ]] || fail "requests to the receiver: '$actual', expected: '$expected'"
 }
 
 assert_mode() {
