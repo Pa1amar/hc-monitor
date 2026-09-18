@@ -1,6 +1,6 @@
-# Install and uninstall. install asks, in order: [install curl?] -> URL -> services -> ports ->
-# certificates -> "Change thresholds?". A here-string adds a final newline, which answers the
-# last question with Enter.
+# Install and uninstall. install asks, in order: [install curl?] -> URL -> interval -> services ->
+# ports -> certificates -> "Change thresholds?". A here-string adds a final newline, which answers
+# the last question with Enter.
 
 test_install_fresh() {
     local cert
@@ -9,13 +9,14 @@ test_install_fresh() {
     printf 'nginx active\n' > "$STUB_DIR/services"
     set_listen tcp 22
     set_listen udp 53
-    # URL, services, ports, certificates; thresholds: Enter
-    INPUT=$'https://hc-ping.com/new-check\nnginx\n22 53/udp\n'"$cert"$'\n'
+    # URL, interval (Enter: 5), services, ports, certificates; thresholds: Enter
+    INPUT=$'https://hc-ping.com/new-check\n\nnginx\n22 53/udp\n'"$cert"$'\n'
     run_script install
     assert_rc 0
     local conf="$ROOT_DIR/etc/hc-monitor.conf" units="$ROOT_DIR/etc/systemd/system"
     assert_mode "$conf" 600
     assert_contains "$conf" 'HC_PING_URL="https://hc-ping.com/new-check"'
+    assert_contains "$conf" 'INTERVAL="5"'
     assert_contains "$conf" 'SERVICES="nginx"'
     assert_contains "$conf" 'PORTS="22 53/udp"'
     assert_contains "$conf" "CERTS=\"$cert\""
@@ -34,22 +35,47 @@ test_install_fresh() {
     assert_contains "$units/hc-monitor.service" "ExecStart=/usr/local/bin/hc-monitor.sh"
     assert_contains "$units/hc-monitor.service" "TimeoutStartSec=4min"
     assert_contains "$units/hc-monitor.timer" "OnCalendar=*:0/5"
+    assert_contains "$units/hc-monitor.timer" "AccuracySec=5s"
     assert_contains "$units/hc-monitor.timer" "WantedBy=timers.target"
     assert_calls_in_order "systemctl daemon-reload" "systemctl start hc-monitor.service" \
-        "systemctl enable --now hc-monitor.timer"
+        "systemctl enable hc-monitor.timer" "systemctl restart hc-monitor.timer"
     assert_requests ""   # the unit (a stub here) sends the first ping; the installer itself sends nothing
     assert_contains "$OUT" "The report will look like this:"
     assert_contains "$OUT" "Services: nginx=active"
     assert_contains "$OUT" "Ports: 22/tcp=listening, 53/udp=listening"
     assert_contains "$OUT" "CPU: 25% busy over 5 min"
     assert_contains "$OUT" "First report sent."
+    assert_contains "$OUT" "Done: a report goes to healthchecks.io every 5 minutes."
     assert_contains "$OUT" "Period: 5 minutes, Grace Time: 10 minutes"
     assert_contains "$OUT" "Add a service: sudo /usr/local/bin/hc-monitor.sh add <name>"
 }
 
+test_install_every_minute() {
+    INPUT=$'\n7\n0\n1\n\n\n\n'   # URL: Enter; interval: 7 and 0 are asked again, then 1; the rest: Enter
+    run_script install
+    assert_rc 0
+    [[ $(grep -c "Expected one of 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60." "$ERR") == 2 ]] ||
+        fail "7 and 0 must both be rejected: $(cat "$ERR")"
+    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'INTERVAL="1"'
+    assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "OnCalendar=*:0/1"
+    assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "Description=Run hc-monitor every minute"
+    assert_contains "$OUT" "Done: a report goes to healthchecks.io every minute."
+    assert_contains "$OUT" "Period: 1 minute, Grace Time: 2 minutes"
+}
+
+test_install_hourly() {
+    INPUT=$'\n60\n\n\n\n'
+    run_script install
+    assert_rc 0
+    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'INTERVAL="60"'
+    assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "OnCalendar=*:00"
+    assert_not_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "*:0/"
+    assert_contains "$OUT" "Period: 60 minutes, Grace Time: 120 minutes"
+}
+
 test_install_requires_url_when_none_is_configured() {
     rm "$ROOT_DIR/etc/hc-monitor.conf"
-    INPUT=$'\nhttps://hc-ping.com/new-check\n\n\n\n'   # Enter without a URL must ask again
+    INPUT=$'\nhttps://hc-ping.com/new-check\n\n\n\n\n'   # Enter without a URL must ask again
     run_script install
     assert_rc 0
     [[ $(grep -c "Expected a URL like https://hc-ping.com/<uuid>" "$ERR") == 1 ]] ||
@@ -59,7 +85,7 @@ test_install_requires_url_when_none_is_configured() {
 
 test_install_reprompts_bad_url_and_unknown_service() {
     printf 'nginx active\n' > "$STUB_DIR/services"
-    INPUT=$'ftp://bad\nhttp://127.0.0.1:1/a"b\nhttp://127.0.0.1:1/new-uuid/\nnginx ngnix\nnginx\n\n\n'
+    INPUT=$'ftp://bad\nhttp://127.0.0.1:1/a"b\nhttp://127.0.0.1:1/new-uuid/\n\nnginx ngnix\nnginx\n\n\n'
     run_script install
     assert_rc 0
     [[ $(grep -c "Expected a URL like https://hc-ping.com/<uuid>" "$ERR") == 2 ]] ||
@@ -70,7 +96,7 @@ test_install_reprompts_bad_url_and_unknown_service() {
 }
 
 test_install_changes_thresholds() {
-    INPUT=$'\n\n\n\ny\n101\n85\n80\n0\n1.5\n95\n0\n30\n11\n3'
+    INPUT=$'\n\n\n\n\ny\n101\n85\n80\n0\n1.5\n95\n0\n30\n11\n3'
     run_script install
     assert_rc 0
     assert_contains "$ERR" "Expected a whole number from 1 to 100."
@@ -91,13 +117,15 @@ test_reinstall_keeps_current_values() {
     cert="localhost:$(tls_port good)"
     write_conf 'HC_PING_URL="http://127.0.0.1:1/keep"' 'SERVICES="cron"' 'PORTS="22"' "CERTS=\"$cert\"" \
         'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' 'LOAD_MAX_PER_CPU="3"' 'CPU_MAX_PCT="80"' 'CERT_MIN_DAYS="21"' \
-        'CONFIRM_RUNS="4"'
+        'CONFIRM_RUNS="4"' 'INTERVAL="10"'
     printf 'cron active\n' > "$STUB_DIR/services"
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
     local conf="$ROOT_DIR/etc/hc-monitor.conf"
     assert_contains "$conf" 'HC_PING_URL="http://127.0.0.1:1/keep"'
+    assert_contains "$conf" 'INTERVAL="10"'
+    assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "OnCalendar=*:0/10"
     assert_contains "$conf" 'SERVICES="cron"'
     assert_contains "$conf" 'PORTS="22"'
     assert_contains "$conf" "CERTS=\"$cert\""
@@ -114,7 +142,7 @@ test_upgrade_from_config_without_new_keys() {
     # (written directly: write_conf would add CONFIRM_RUNS).
     printf '%s\n' 'HC_PING_URL="http://127.0.0.1:1/old"' 'SERVICES=""' 'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' \
         > "$ROOT_DIR/etc/hc-monitor.conf"
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
     local conf="$ROOT_DIR/etc/hc-monitor.conf"
@@ -123,11 +151,12 @@ test_upgrade_from_config_without_new_keys() {
     assert_contains "$conf" 'CPU_MAX_PCT="90"'
     assert_contains "$conf" 'CERT_MIN_DAYS="14"'
     assert_contains "$conf" 'CONFIRM_RUNS="2"'
+    assert_contains "$conf" 'INTERVAL="5"'
     assert_contains "$conf" 'DISK_MAX_PCT="70"'
 }
 
 test_install_rejects_invalid_certificates() {
-    INPUT=$'\n\n\nhttps://example.com example.com:0\n-\n'   # both entries are rejected, then "-"
+    INPUT=$'\n\n\n\nhttps://example.com example.com:0\n-\n'   # both entries are rejected, then "-"
     run_script install
     assert_rc 0
     [[ $(grep -c "^Invalid certificate entry: " "$ERR") == 2 ]] ||
@@ -139,14 +168,14 @@ test_install_rejects_invalid_certificates() {
 test_install_dash_clears_services() {
     write_conf 'HC_PING_URL="http://127.0.0.1:1/x"' 'SERVICES="cron"'
     printf 'cron active\n' > "$STUB_DIR/services"
-    INPUT=$'\n-\n\n\n'
+    INPUT=$'\n\n-\n\n\n'
     run_script install
     assert_rc 0
     assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'SERVICES=""'
 }
 
 test_install_rejects_invalid_ports() {
-    INPUT=$'\n\ndb.local:5432 70000 53/icmp 0 0443 443/TCP\n22 53/udp 65535\n\n'
+    INPUT=$'\n\n\ndb.local:5432 70000 53/icmp 0 0443 443/TCP\n22 53/udp 65535\n\n'
     run_script install
     assert_rc 0
     [[ $(grep -c "^Invalid port: " "$ERR") == 6 ]] || fail "all six invalid entries must be reported"
@@ -156,7 +185,7 @@ test_install_rejects_invalid_ports() {
 
 test_install_dash_clears_ports() {
     write_conf 'HC_PING_URL="http://127.0.0.1:1/x"' 'PORTS="22"'
-    INPUT=$'\n\n-\n\n'
+    INPUT=$'\n\n\n-\n\n'
     run_script install
     assert_rc 0
     assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'PORTS=""'
@@ -166,7 +195,7 @@ test_install_from_installed_copy() {
     mkdir -p "$ROOT_DIR/usr/local/bin"
     cp "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh"
     RUN_SCRIPT="$ROOT_DIR/usr/local/bin/hc-monitor.sh"
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
     cmp -s "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh" || fail "the installed copy got corrupted"
@@ -174,7 +203,7 @@ test_install_from_installed_copy() {
 
 test_install_warns_when_report_has_problems() {
     set_df ' 95%   12% ext4     /'
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
     assert_contains "$OUT" "Warning: a report lists problems, so its first ping goes to /fail and healthchecks.io will send an alert."
@@ -182,7 +211,7 @@ test_install_warns_when_report_has_problems() {
 
 test_install_first_report_failure_keeps_timer_off() {
     echo 1 > "$STUB_DIR/start.rc"
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 1
     assert_contains "$ERR" "the first report was not sent and the timer is not enabled"
@@ -198,7 +227,7 @@ test_install_eof_exits_1() {
 
 test_install_requires_systemd() {
     rmdir "$ROOT_DIR/run/systemd/system"
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 1
     assert_contains "$ERR" "systemd is required"
@@ -206,7 +235,7 @@ test_install_requires_systemd() {
 
 test_install_offers_curl_when_missing() {
     make_path_without_curl
-    INPUT=$'y\n\n\n\n\n'
+    INPUT=$'y\n\n\n\n\n\n'
     run_script install
     assert_rc 0
     assert_calls_in_order "apt-get update" "apt-get install -y curl"
@@ -222,7 +251,7 @@ test_install_without_curl_declined_exits_1() {
 }
 
 test_uninstall_yes_removes_everything() {
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
     add_restarts_state . nginx 1
@@ -245,7 +274,7 @@ test_uninstall_yes_removes_everything() {
 }
 
 test_uninstall_declined_keeps_everything() {
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     INPUT=$'n\n'
     run_script uninstall
@@ -256,7 +285,7 @@ test_uninstall_declined_keeps_everything() {
 }
 
 test_confirm_asks_again_on_unclear_answer() {
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     INPUT=$'maybe\nyes\n'   # anything other than y/yes/n/no is asked again
     run_script uninstall

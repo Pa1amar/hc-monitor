@@ -270,6 +270,14 @@ test_cpu_stale_or_reset_sample_is_not_used() {
     assert_contains "$OUT" "CPU: 50% busy over 1 s"
 }
 
+test_cpu_average_over_a_long_interval() {
+    # With checks every hour, a sample from 50 minutes ago is the previous run's, not a stale one.
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'INTERVAL="60"'
+    set_cpu_state 3000 8600 7250 100 0
+    run_script --dry-run
+    assert_contains "$OUT" "CPU: 25% busy over 50 min"
+}
+
 test_cpu_without_ticks_is_a_problem() {
     rm "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
     use_sleep_stub 1000 0 500 8000 100 0 0 0   # the counters do not move
