@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        run: |
+          bash --version | head -n 1
+          shellcheck --version | sed -n 2p
+          curl --version | head -n 1
+          python3 --version
+
+      - name: shellcheck
+        run: shellcheck --shell=bash --severity=warning hc-monitor.sh tests/*.sh tests/stubs/*
+
+      - name: Tests
+        run: bash tests/run-tests.sh
