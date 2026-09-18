@@ -101,7 +101,7 @@ test_service_file_errors() {
     add_service "h bad name" 'PORTS="22"'
     run_script --dry-run
     assert_rc 0
-    assert_contains "$OUT" "- Service a-empty: nothing to check (set SERVICES, PORTS or HTTP_URL)"
+    assert_contains "$OUT" "- Service a-empty: nothing to check (set SERVICES, PORTS, CERTS or HTTP_URL)"
     assert_contains "$OUT" "- Service b-broken: cannot load /root/.healthchecks/b-broken/.env"
     assert_contains "$OUT" "- Service c-unset: cannot load /root/.healthchecks/c-unset/.env"
     assert_contains "$OUT" "- Service d-expect: HTTP_EXPECT is set without HTTP_URL"
@@ -163,14 +163,17 @@ test_directory_without_env_is_ignored() {
     assert_not_contains "$OUT" "notes"
 }
 
-# add asks, in order: ping URL -> services -> ports -> health check URL -> [expected text, only
-# when there is a URL]. A here-string adds a final newline, which answers the last question with Enter.
+# add asks, in order: ping URL -> services -> ports -> certificates -> health check URL ->
+# [expected text, only when there is a URL]. A here-string adds a final newline, which answers the
+# last question with Enter.
 
 test_add_creates_service_file() {
+    local cert
+    cert="localhost:$(tls_port good)"
     printf 'nym-node active\n' > "$STUB_DIR/services"
     set_listen tcp 1789
     set_response /health 200 '{"status":"up"}'
-    INPUT="http://127.0.0.1:$SERVER_PORT/svc-uuid/"$'\nnym-node\n1789\n'"http://127.0.0.1:$SERVER_PORT/health"$'\n"status" *: *"up"'
+    INPUT="http://127.0.0.1:$SERVER_PORT/svc-uuid/"$'\nnym-node\n1789\n'"$cert"$'\n'"http://127.0.0.1:$SERVER_PORT/health"$'\n"status" *: *"up"'
     run_script add nym
     assert_rc 0
     local dir="$ROOT_DIR/root/.healthchecks/nym"
@@ -180,9 +183,11 @@ test_add_creates_service_file() {
     assert_contains "$dir/.env" "HC_PING_URL='http://127.0.0.1:$SERVER_PORT/svc-uuid'"
     assert_contains "$dir/.env" "SERVICES='nym-node'"
     assert_contains "$dir/.env" "PORTS='1789'"
+    assert_contains "$dir/.env" "CERTS='$cert'"
     assert_contains "$dir/.env" "HTTP_URL='http://127.0.0.1:$SERVER_PORT/health'"
     assert_contains "$dir/.env" "HTTP_EXPECT='\"status\" *: *\"up\"'"
     assert_contains "$OUT" "Ping URL: http://127.0.0.1:$SERVER_PORT/svc-uuid"
+    assert_contains "$OUT" "TLS $cert: valid until"
     assert_contains "$OUT" "HTTP http://127.0.0.1:$SERVER_PORT/health: 200, expected text found"
     assert_contains "$OUT" "Period 5 minutes, Grace Time 10 minutes"
     run_script --dry-run
@@ -193,14 +198,15 @@ test_add_creates_service_file() {
 test_add_again_keeps_values() {
     printf 'cron active\n' > "$STUB_DIR/services"
     add_service nym "HC_PING_URL='http://127.0.0.1:1/svc'" "SERVICES='cron'" "PORTS='22'" \
-        "HTTP_URL='http://127.0.0.1:9/health'" "HTTP_EXPECT='\"status\" *: *\"up\"'"
-    INPUT=$'\n\n\n\n'
+        "CERTS='localhost:9'" "HTTP_URL='http://127.0.0.1:9/health'" "HTTP_EXPECT='\"status\" *: *\"up\"'"
+    INPUT=$'\n\n\n\n\n'
     run_script add nym
     assert_rc 0
     local env="$ROOT_DIR/root/.healthchecks/nym/.env"
     assert_contains "$env" "HC_PING_URL='http://127.0.0.1:1/svc'"
     assert_contains "$env" "SERVICES='cron'"
     assert_contains "$env" "PORTS='22'"
+    assert_contains "$env" "CERTS='localhost:9'"
     assert_contains "$env" "HTTP_URL='http://127.0.0.1:9/health'"
     assert_contains "$env" "HTTP_EXPECT='\"status\" *: *\"up\"'"
 }
@@ -208,18 +214,19 @@ test_add_again_keeps_values() {
 test_add_requires_something_to_check() {
     printf 'cron active\n' > "$STUB_DIR/services"
     add_service nym "PORTS='22'"
-    # URL, services: Enter; ports, health URL: "-" -> nothing to check -> services: cron, ports and URL: Enter
-    INPUT=$'\n\n-\n-\ncron\n\n'
+    # URL, services: Enter; ports: "-"; certificates: Enter; health URL: "-" -> nothing to check ->
+    # services: cron; ports, certificates and health URL: Enter
+    INPUT=$'\n\n-\n\n-\ncron\n\n\n'
     run_script add nym
     assert_rc 0
-    assert_contains "$ERR" "Nothing to check: set at least one service, port or health check URL."
+    assert_contains "$ERR" "Nothing to check: set at least one service, port, certificate or health check URL."
     assert_contains "$ROOT_DIR/root/.healthchecks/nym/.env" "SERVICES='cron'"
     assert_contains "$ROOT_DIR/root/.healthchecks/nym/.env" "PORTS=''"
 }
 
 test_add_rejects_invalid_answers() {
     printf 'cron active\n' > "$STUB_DIR/services"
-    INPUT="http://127.0.0.1:$SERVER_PORT/test-uuid"$'\nftp://x\nhttp://127.0.0.1:1/svc\ncron\n\nhttp://127.0.0.1:9/health\n(up\nup'
+    INPUT="http://127.0.0.1:$SERVER_PORT/test-uuid"$'\nftp://x\nhttp://127.0.0.1:1/svc\ncron\n\n\nhttp://127.0.0.1:9/health\n(up\nup'
     run_script add nym
     assert_rc 0
     [[ $(grep -c "of a separate check (not the server's)" "$ERR") == 2 ]] ||
@@ -262,7 +269,7 @@ test_remove_unknown_service_exits_1() {
 }
 
 test_uninstall_keeps_service_files() {
-    INPUT=$'\n\n\n'
+    INPUT=$'\n\n\n\n'
     run_script install
     assert_rc 0
     add_service nym "PORTS='22'"

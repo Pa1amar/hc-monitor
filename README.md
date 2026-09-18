@@ -4,7 +4,7 @@
 
 A single bash script that monitors an Ubuntu server through [healthchecks.io](https://healthchecks.io/).
 
-Every 5 minutes a systemd timer runs the script. It checks disk space and inodes, memory and OOM kills, CPU load and usage, and the systemd services (including their automatic restarts) and local ports you choose, then reports to your healthchecks.io check:
+Every 5 minutes a systemd timer runs the script. It checks disk space and inodes, memory and OOM kills, CPU load and usage, and the systemd services (including their automatic restarts), local ports and TLS certificates you choose, then reports to your healthchecks.io check:
 
 - **all good** — a regular ping with a short summary;
 - **something is wrong** — a ping to `<ping-url>/fail` with the list of problems, so the check goes down and healthchecks.io alerts you right away;
@@ -18,6 +18,7 @@ A service can also get a file of its own with its units, ports and HTTP health e
 
 - Ubuntu (or another Linux) with systemd, bash 4.4+ and GNU coreutils
 - `curl` — the installer offers to install it with apt if it's missing
+- `openssl` for certificate checks — preinstalled on Ubuntu
 - root access (`sudo`)
 - a check on healthchecks.io — **one check per server**: if two servers ping the same check, a live server hides a dead one
 
@@ -46,9 +47,10 @@ A service can also get a file of its own with its units, ports and HTTP health e
    - the ping URL;
    - the systemd services to watch, space-separated (for example `nginx postgresql`) — names that don't exist are rejected;
    - the local ports to watch, space-separated (for example `22 443 53/udp`; a bare number means TCP);
-   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%).
+   - the TLS certificates to watch, space-separated (for example `gw.example.com gw.example.com:9001`; a bare host name means port 443);
+   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days).
 
-   For both lists, Enter keeps the current list (none on a fresh install) and `-` clears it.
+   For the lists, Enter keeps the current list (none on a fresh install) and `-` clears it.
 
    Then it shows the report, sends the first ping through the systemd unit and enables the timer. If the first ping fails, it prints `systemctl status hc-monitor.service` and leaves the timer off, so you can fix the cause and run `install` again.
 
@@ -70,6 +72,7 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 | Services | a listed unit is not `active` or `reloading` | a unit that doesn't exist is reported separately, so a typo doesn't look like a crash |
 | Restarts | a listed unit was restarted automatically since the previous run | systemd's `NRestarts` counter: catches a service that crashes and comes back between checks; a manual restart resets it and raises no alarm |
 | Ports | a listed local TCP or UDP port has no listening socket | read from `/proc/net`; `443` means TCP, `53/udp` means UDP; any local address counts (see below) |
+| TLS certificates | a listed certificate expires in fewer than `CERT_MIN_DAYS` days, has expired, doesn't match the host name or isn't trusted | checked with `openssl s_client` the way clients see it (system CA store); `gw.example.com` means port 443 |
 
 A check that can't run — for example `df` hanging for more than 10 seconds — is reported as a problem too, never skipped silently.
 
@@ -95,6 +98,7 @@ Load (1/5/15 min): 0.52 0.58 0.59, CPUs: 4
 CPU: 38% busy over 5 min (steal 1%, iowait 2%)
 Services: nginx=active, postgresql=active
 Ports: 22/tcp=listening, 443/tcp=listening
+TLS web-1.example.com:443: valid until 2027-03-01 (164 days)
 ```
 
 A clean report starts with `All good`.
@@ -114,11 +118,12 @@ The settings are stored in `/root/.healthchecks/<name>/.env`, and you can write 
 HC_PING_URL="https://hc-ping.com/<uuid>"        # the service's own check; empty: report with the server
 SERVICES="nym-node"
 PORTS="1789 8080 9000"
+CERTS="gw.example.com:9001"
 HTTP_URL="http://localhost:8080/api/v1/health"
 HTTP_EXPECT='"status" *: *"up"'                 # the response must match this regular expression
 ```
 
-- Set at least one of `SERVICES`, `PORTS` and `HTTP_URL`; they are checked like the server settings.
+- Set at least one of `SERVICES`, `PORTS`, `CERTS` and `HTTP_URL`; they are checked like the server settings.
 - `HTTP_URL` must answer with a 2xx status within 10 seconds (redirects are followed). `HTTP_EXPECT` is an optional extended regular expression; without it any 2xx response is fine.
 - With `HC_PING_URL`, the service sends its own report (to `/fail` when it lists problems), so give that check the same schedule: Period 5 minutes, Grace Time 10 minutes. It must be a different check from the server's. Without `HC_PING_URL`, the service's lines go into the server report, prefixed with `[<name>]`.
 - The file is a shell script that runs as root on every check, so the file and its directories must belong to root and not be writable by group or others. A file that breaks this rule, fails to load or has invalid settings is skipped and reported as a problem in the server report.
@@ -180,10 +185,12 @@ sudo bash hc-monitor.sh install
 HC_PING_URL="https://hc-ping.com/<uuid>"
 SERVICES="nginx postgresql"
 PORTS="22 443 53/udp"
+CERTS="web-1.example.com"
 DISK_MAX_PCT="90"
 MEM_MAX_PCT="90"
 LOAD_MAX_PER_CPU="2"
 CPU_MAX_PCT="90"
+CERT_MIN_DAYS="14"
 ```
 
 To automate the setup, write this file first and then answer every installer question with Enter: `yes '' | head -n 20 | sudo bash hc-monitor.sh install`. Each question keeps the value from the file, so the order of the questions doesn't matter; an invalid value makes the installer stop with "input aborted".
