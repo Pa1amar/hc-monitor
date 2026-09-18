@@ -1,12 +1,18 @@
 #!/bin/bash
 # systemctl stub: logs the call to $STUB_DIR/calls.log.
-# Service states are "name state" lines in $STUB_DIR/services;
+# Service states are "name state" lines in $STUB_DIR/services, automatic restart counts are
+# "name count" lines in $STUB_DIR/restarts (0 by default);
 # the `systemctl start` exit code comes from $STUB_DIR/start.rc (0 by default).
 echo "systemctl $*" >> "$STUB_DIR/calls.log"
 
 state_of() {
     awk -v name="${1%.service}" '$1 == name { print $2; found = 1; exit } END { exit !found }' \
         "$STUB_DIR/services"
+}
+
+restarts_of() {
+    awk -v name="${1%.service}" '$1 == name { print $2; found = 1; exit } END { if (!found) print 0 }' \
+        "$STUB_DIR/restarts"
 }
 
 case "$1" in
@@ -20,7 +26,13 @@ case "$1" in
         exit 3
         ;;
     show)
-        if state_of "${!#}" > /dev/null; then echo loaded; else echo not-found; fi
+        if [[ $3 == NRestarts ]]; then
+            restarts_of "${!#}"
+        elif state_of "${!#}" > /dev/null; then
+            echo loaded
+        else
+            echo not-found
+        fi
         ;;
     start)
         exit "$(cat "$STUB_DIR/start.rc" 2> /dev/null || echo 0)"

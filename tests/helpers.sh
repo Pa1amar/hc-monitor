@@ -43,8 +43,10 @@ setup() {
     set_listen udp
     set_cpu 1000 0 500 8000 100 0 0 0          # total 9600, idle 8000, iowait 100, steal 0
     set_cpu_state 300 8600 7250 100 0          # 5 minutes ago: 25% busy since then
+    set_oom_kills 0
     echo 4 > "$STUB_DIR/nproc"
     : > "$STUB_DIR/services"
+    : > "$STUB_DIR/restarts"
     : > "$CALLS"
     write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\""
     : > "$SERVER_DIR/requests.log"
@@ -91,6 +93,26 @@ set_cpu_state() {
     printf -v now '%(%s)T' -1
     mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
     echo "$((now - $1)) $2 $3 $4 $5" > "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
+}
+
+# set_oom_kills <n> — /proc/vmstat with the kernel's count of processes killed by the OOM killer.
+set_oom_kills() {
+    printf 'nr_free_pages 12345\noom_kill %s\npgfault 999\n' "$1" > "$ROOT_DIR/proc/vmstat"
+}
+
+# set_oom_state <seconds ago> <count> — the OOM kill count saved by the previous run.
+set_oom_state() {
+    local now
+    printf -v now '%(%s)T' -1
+    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
+    echo "$((now - $1)) $2" > "$ROOT_DIR/var/lib/hc-monitor/oom.state"
+}
+
+# add_restarts_state <context> <unit> <count> — a restart count saved by the previous run
+# (context "." is the server, otherwise a service name).
+add_restarts_state() {
+    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/var/lib/hc-monitor/restarts.state"
 }
 
 # use_sleep_stub <user nice system idle iowait irq softirq steal> — `sleep` rewrites /proc/stat
