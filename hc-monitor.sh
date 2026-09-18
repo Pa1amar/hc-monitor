@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # hc-monitor.sh: checks an Ubuntu server and reports to healthchecks.io.
 #
-# Install on the server (asks for the ping URL, services, ports and thresholds):
+# Install on the server (asks for the ping URL, how often to check, services, ports,
+# certificates and thresholds):
 #     sudo bash hc-monitor.sh install
 # Afterwards:
 #     sudo hc-monitor.sh --dry-run         show the reports without sending them
 #     sudo hc-monitor.sh add <name>        add or change a service: ~/.healthchecks/<name>/.env
 #     sudo hc-monitor.sh remove <name>     remove a service
-#     sudo hc-monitor.sh install           reconfigure
+#     sudo hc-monitor.sh install           reconfigure (also to change how often it checks)
 #     sudo hc-monitor.sh uninstall         remove hc-monitor
 #     journalctl -u hc-monitor             logs
 #
-# Every 5 minutes a systemd timer runs the script without arguments: it checks disk, RAM,
-# CPU load and usage, the configured services and local ports, then sends the report to
-# healthchecks.io, to the check's ping URL or, when something is wrong, to URL/fail.
+# Every INTERVAL minutes (5 by default) a systemd timer runs the script without arguments: it
+# checks disk, RAM, CPU load and usage, the configured services, local ports and certificates,
+# then sends the report to healthchecks.io, to the check's ping URL or, when something is wrong,
+# to URL/fail.
 # A service file adds a service's units, ports and health endpoint, reported with the server
 # or to the service's own check.
 
@@ -43,7 +45,6 @@ readonly RESTARTS_STATE="$STATE_DIR/restarts.state"
 readonly OOM_STATE="$STATE_DIR/oom.state"
 readonly CONFIRM_STATE="$STATE_DIR/confirm.state"
 readonly VMSTAT="$ROOT/proc/vmstat"
-readonly CPU_MAX_AGE=900   # seconds; an older saved sample is not used for the average
 
 # Service files live in root's home: the timer runs as root, and systemd doesn't set $HOME.
 root_home=$(getent passwd 0 2> /dev/null)
@@ -59,6 +60,7 @@ readonly TLS_TIMEOUT=15
 
 # Defaults; /etc/hc-monitor.conf overrides them.
 HC_PING_URL=""
+INTERVAL=5   # minutes between runs; the timer is written by install
 SERVICES=""
 PORTS=""
 CERTS=""
@@ -171,6 +173,16 @@ valid_runs() {
     [[ $1 =~ ^([1-9]|10)$ ]]
 }
 
+# valid_interval <minutes>: divides an hour, so the runs keep the same distance at every hour.
+valid_interval() {
+    [[ $1 =~ ^(1|2|3|4|5|6|10|12|15|20|30|60)$ ]]
+}
+
+# minutes_text <n>: "1 minute" or "<n> minutes".
+minutes_text() {
+    if (( $1 == 1 )); then echo "1 minute"; else echo "$1 minutes"; fi
+}
+
 valid_service_name() {
     [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
 }
@@ -194,6 +206,7 @@ validate_config() {
     local entry
     [[ -n $HC_PING_URL ]] || die 2 "HC_PING_URL is not set, run install"
     valid_url "$HC_PING_URL" || die 2 "invalid HC_PING_URL in $CONF_FILE"
+    valid_interval "$INTERVAL" || die 2 "invalid INTERVAL in $CONF_FILE: $INTERVAL"
     valid_pct "$DISK_MAX_PCT" || die 2 "invalid DISK_MAX_PCT in $CONF_FILE: $DISK_MAX_PCT"
     valid_pct "$MEM_MAX_PCT" || die 2 "invalid MEM_MAX_PCT in $CONF_FILE: $MEM_MAX_PCT"
     valid_load "$LOAD_MAX_PER_CPU" || die 2 "invalid LOAD_MAX_PER_CPU in $CONF_FILE: $LOAD_MAX_PER_CPU"
@@ -353,6 +366,8 @@ cpu_counters() {
 check_cpu() {
     local cur saved="" now elapsed span d_total busy total idle iowait steal
     local p_time=0 p_total=0 p_idle=0 p_iowait=0 p_steal=0
+    # A saved sample older than three intervals (and 15 minutes) is not the previous run's.
+    local max_age=$(( INTERVAL * 180 > 900 ? INTERVAL * 180 : 900 ))
     CPU_SAMPLE=""
     if ! cur=$(cpu_counters); then
         problem "CPU: cannot read /proc/stat"
@@ -369,7 +384,7 @@ check_cpu() {
         p_time=$1 p_total=$2 p_idle=$3 p_iowait=$4 p_steal=$5
     fi
     elapsed=$(( now - p_time ))
-    if (( p_time == 0 || elapsed < 1 || elapsed > CPU_MAX_AGE || total <= p_total ||
+    if (( p_time == 0 || elapsed < 1 || elapsed > max_age || total <= p_total ||
           idle < p_idle || iowait < p_iowait || steal < p_steal )); then
         # No usable sample from the previous run: measure over one second instead.
         p_total=$total p_idle=$idle p_iowait=$iowait p_steal=$steal
@@ -1107,6 +1122,9 @@ ask_settings() {
         "Expected a URL like https://hc-ping.com/<uuid> without spaces, quotes, \$, \` or \\."
     HC_PING_URL="$ANSWER"
     trim_slashes HC_PING_URL
+    ask_valid "How often to check, in minutes: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60" "$INTERVAL" \
+        valid_interval "Expected one of 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60."
+    INTERVAL="$ANSWER"
     ask_list "Systemd services to watch, space-separated" "$SERVICES" check_service_entry
     SERVICES="$ANSWER"
     ask_list "Local ports to watch, space-separated: 443 or 443/tcp for TCP, 53/udp for UDP" \
@@ -1141,6 +1159,7 @@ write_config() {
     if ! cat > "$tmp" <<EOF
 # hc-monitor settings. Change them with: sudo $INSTALLED_PATH install (or edit this file).
 HC_PING_URL="$HC_PING_URL"
+INTERVAL="$INTERVAL"
 SERVICES="$SERVICES"
 PORTS="$PORTS"
 CERTS="$CERTS"
@@ -1181,17 +1200,28 @@ Type=oneshot
 ExecStart=$INSTALLED_PATH
 TimeoutStartSec=4min
 EOF
-    write_unit "$UNIT_DIR/hc-monitor.timer" <<'EOF'
+    write_unit "$UNIT_DIR/hc-monitor.timer" <<EOF
 [Unit]
-Description=Run hc-monitor every 5 minutes
+Description=Run hc-monitor $(every_text)
 
 [Timer]
-OnCalendar=*:0/5
+OnCalendar=$(timer_calendar)
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target
 EOF
     systemctl daemon-reload || die 1 "systemctl daemon-reload failed"
+}
+
+# every_text: "every minute" or "every <INTERVAL> minutes".
+every_text() {
+    if (( INTERVAL == 1 )); then echo "every minute"; else echo "every $INTERVAL minutes"; fi
+}
+
+# timer_calendar: the timer's OnCalendar for INTERVAL, at fixed minutes of every hour.
+timer_calendar() {
+    if (( INTERVAL == 60 )); then echo "*:00"; else echo "*:0/$INTERVAL"; fi
 }
 
 first_report() {
@@ -1211,8 +1241,10 @@ first_report() {
     echo "First report sent."
 }
 
+# enable_timer: enables the timer and restarts it, so a changed schedule applies at once.
 enable_timer() {
-    systemctl enable --now hc-monitor.timer || die 1 "cannot enable hc-monitor.timer"
+    { systemctl enable hc-monitor.timer && systemctl restart hc-monitor.timer; } ||
+        die 1 "cannot enable hc-monitor.timer"
     echo
     systemctl list-timers hc-monitor.timer --no-pager
 }
@@ -1220,10 +1252,10 @@ enable_timer() {
 print_done() {
     cat <<EOF
 
-Done: a report goes to healthchecks.io every 5 minutes.
+Done: a report goes to healthchecks.io $(every_text).
 
 In healthchecks.io, set the check's schedule to:
-    Period: 5 minutes, Grace Time: 10 minutes.
+    Period: $(minutes_text "$INTERVAL"), Grace Time: $(minutes_text $((2 * INTERVAL))).
 
 Logs:          journalctl -u hc-monitor
 Check now:     sudo $INSTALLED_PATH --dry-run
@@ -1399,9 +1431,9 @@ cmd_add() {
     echo
     preview_service "$name"
     echo
-    echo "Saved ${SERVICES_DIR#"$ROOT"}/$name/.env; the next run (within 5 minutes) checks it."
+    echo "Saved ${SERVICES_DIR#"$ROOT"}/$name/.env; the next run (within $(minutes_text "$INTERVAL")) checks it."
     if [[ -n $url ]]; then
-        echo "In healthchecks.io, set the schedule of its check to: Period 5 minutes, Grace Time 10 minutes."
+        echo "In healthchecks.io, set the schedule of its check to: Period $(minutes_text "$INTERVAL"), Grace Time $(minutes_text $((2 * INTERVAL)))."
     fi
     if [[ ! -e $UNIT_DIR/hc-monitor.timer ]]; then
         echo "hc-monitor isn't installed yet: run sudo bash hc-monitor.sh install."

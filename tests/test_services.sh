@@ -211,6 +211,16 @@ test_add_again_keeps_values() {
     assert_contains "$env" "HTTP_EXPECT='\"status\" *: *\"up\"'"
 }
 
+test_add_shows_the_configured_interval() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'INTERVAL="1"'
+    add_service nym "HC_PING_URL='http://127.0.0.1:1/svc'" "PORTS='22'"
+    INPUT=$'\n\n\n\n'   # URL, services, ports, certificates; health URL: Enter
+    run_script add nym
+    assert_rc 0
+    assert_contains "$OUT" "the next run (within 1 minute) checks it."
+    assert_contains "$OUT" "Period 1 minute, Grace Time 2 minutes."
+}
+
 test_add_requires_something_to_check() {
     printf 'cron active\n' > "$STUB_DIR/services"
     add_service nym "PORTS='22'"
@@ -269,7 +279,7 @@ test_remove_unknown_service_exits_1() {
 }
 
 test_uninstall_keeps_service_files() {
-    INPUT=$'\n\n\n\n'
+    INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
     add_service nym "PORTS='22'"

@@ -4,7 +4,7 @@
 
 A single bash script that monitors an Ubuntu server through [healthchecks.io](https://healthchecks.io/).
 
-Every 5 minutes a systemd timer runs the script. It checks disk space and inodes, memory and OOM kills, CPU load and usage, and the systemd services (including their automatic restarts), local ports and TLS certificates you choose, then reports to your healthchecks.io check:
+A systemd timer runs the script every few minutes — every 5 by default, anywhere from every minute to every hour. It checks disk space and inodes, memory and OOM kills, CPU load and usage, and the systemd services (including their automatic restarts), local ports and TLS certificates you choose, then reports to your healthchecks.io check:
 
 - **all good** — a regular ping with a short summary;
 - **something is wrong** — a ping to `<ping-url>/fail` with the list of problems, so the check goes down and healthchecks.io alerts you right away;
@@ -45,6 +45,7 @@ A service can also get a file of its own with its units, ports and HTTP health e
 
    The installer asks for:
    - the ping URL;
+   - how often to check, in minutes: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60 (5 by default) — the runs happen at the same minutes of every hour;
    - the systemd services to watch, space-separated (for example `nginx postgresql`) — names that don't exist are rejected;
    - the local ports to watch, space-separated (for example `22 443 53/udp`; a bare number means TCP);
    - the TLS certificates to watch, space-separated (for example `gw.example.com gw.example.com:9001`; a bare host name means port 443);
@@ -54,7 +55,7 @@ A service can also get a file of its own with its units, ports and HTTP health e
 
    Then it shows the report, sends the first ping through the systemd unit and enables the timer. If the first ping fails, it prints `systemctl status hc-monitor.service` and leaves the timer off, so you can fix the cause and run `install` again.
 
-3. In healthchecks.io set the check's schedule to **Period: 5 minutes, Grace Time: 10 minutes**. One missed ping won't raise a false alarm, and a silent server is reported within 15 minutes.
+3. In healthchecks.io set the check's schedule to **Period = the interval, Grace Time = twice the interval** — for the default 5 minutes, Period 5 minutes and Grace Time 10 minutes; the installer prints the values. One missed ping won't raise a false alarm, and a silent server is reported within three intervals.
 
 Keep the ping URL private: anyone who knows it can send "all good" pings to your check.
 
@@ -76,7 +77,7 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 
 A check that can't run — for example `df` hanging for more than 10 seconds — is reported as a problem too, never skipped silently.
 
-A problem is reported only once it has lasted `CONFIRM_RUNS` runs in a row (2 by default, about five minutes), so a one-off hiccup doesn't raise an alarm. Until then the report lists it under `Pending` and the check stays up:
+A problem is reported only once it has lasted `CONFIRM_RUNS` runs in a row (2 by default, so one interval later), so a one-off hiccup doesn't raise an alarm. Until then the report lists it under `Pending` and the check stays up:
 
 ```
 All good
@@ -87,7 +88,7 @@ Pending:
 
 A problem stays the same across runs while the text before its first colon does (for example `Disk /var`), even when the figures change; once it's gone, its count starts over. Set `CONFIRM_RUNS="1"` to report problems at once.
 
-Restarts and OOM kills are events, not states, and are reported at once: the check goes down for one run and comes back up on the next one if nothing else happened, so you get an alert and, five minutes later, a recovery notice. The first run after installing or rebooting only records the counters.
+Restarts and OOM kills are events, not states, and are reported at once: the check goes down for one run and comes back up on the next one if nothing else happened, so you get an alert and, one interval later, a recovery notice. The first run after installing or rebooting only records the counters.
 
 Port checks look for a listening socket on any local address, loopback included, so:
 
@@ -136,7 +137,7 @@ HTTP_EXPECT='"status" *: *"up"'                 # the response must match this r
 
 - Set at least one of `SERVICES`, `PORTS`, `CERTS` and `HTTP_URL`; they are checked like the server settings.
 - `HTTP_URL` must answer with a 2xx status within 10 seconds (redirects are followed). `HTTP_EXPECT` is an optional extended regular expression; without it any 2xx response is fine.
-- With `HC_PING_URL`, the service sends its own report (to `/fail` when it lists problems), so give that check the same schedule: Period 5 minutes, Grace Time 10 minutes. It must be a different check from the server's. Without `HC_PING_URL`, the service's lines go into the server report, prefixed with `[<name>]`.
+- With `HC_PING_URL`, the service sends its own report (to `/fail` when it lists problems), so give that check the same schedule as the server's: Period = the interval, Grace Time = twice the interval. It must be a different check from the server's. Without `HC_PING_URL`, the service's lines go into the server report, prefixed with `[<name>]`.
 - The file is a shell script that runs as root on every check, so the file and its directories must belong to root and not be writable by group or others. A file that breaks this rule, fails to load or has invalid settings is skipped and reported as a problem in the server report.
 - The next run picks up new and changed files, and `sudo hc-monitor.sh --dry-run` shows every report. `uninstall` keeps these files.
 
@@ -162,7 +163,7 @@ HTTP http://localhost:8080/api/v1/health: 200, expected text found
 | `systemctl list-timers hc-monitor.timer` | when the next run is |
 | `sudo hc-monitor.sh add <name>` | add a service or change its settings |
 | `sudo hc-monitor.sh remove <name>` | remove a service, after a confirmation |
-| `sudo hc-monitor.sh install` | change the URL, services, ports or thresholds; current values are offered as defaults |
+| `sudo hc-monitor.sh install` | change the URL, how often to check, services, ports, certificates or thresholds; current values are offered as defaults |
 | `sudo hc-monitor.sh uninstall` | remove everything except service files, after a confirmation |
 
 After uninstalling, pause or delete the check in healthchecks.io, and the checks of your services — otherwise they alert when the pings stop.
@@ -184,17 +185,18 @@ sudo bash hc-monitor.sh install
 | `/usr/local/bin/hc-monitor.sh` | 700 | the script |
 | `/etc/hc-monitor.conf` | 600 | settings |
 | `/etc/systemd/system/hc-monitor.service` | 644 | oneshot unit that runs the script |
-| `/etc/systemd/system/hc-monitor.timer` | 644 | runs the unit every 5 minutes (`OnCalendar=*:0/5`) |
+| `/etc/systemd/system/hc-monitor.timer` | 644 | runs the unit every `INTERVAL` minutes (`OnCalendar=*:0/5` for 5) |
 | `/var/lib/hc-monitor/cpu.stat` | 644 | CPU counters from the previous run, for the average |
 | `/var/lib/hc-monitor/restarts.state` | 644 | restart counts of the watched units from the previous run |
 | `/var/lib/hc-monitor/oom.state` | 644 | the OOM kill count from the previous run |
 | `/var/lib/hc-monitor/confirm.state` | 644 | how many runs in a row each current problem has been seen |
 | `/root/.healthchecks/<name>/.env` | 600 | settings of a service, written by `add` (kept by `uninstall`) |
 
-`/etc/hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits:
+`/etc/hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits — except `INTERVAL`: the schedule lives in the timer, so change it with `sudo hc-monitor.sh install`, which rewrites and restarts the timer.
 
 ```bash
 HC_PING_URL="https://hc-ping.com/<uuid>"
+INTERVAL="5"
 SERVICES="nginx postgresql"
 PORTS="22 443 53/udp"
 CERTS="web-1.example.com"
