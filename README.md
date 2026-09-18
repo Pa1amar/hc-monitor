@@ -1,5 +1,7 @@
 # hc-monitor
 
+[![tests](https://github.com/Pa1amar/hc-monitor/actions/workflows/tests.yml/badge.svg)](https://github.com/Pa1amar/hc-monitor/actions/workflows/tests.yml)
+
 A single bash script that monitors an Ubuntu server through [healthchecks.io](https://healthchecks.io/).
 
 Every 5 minutes a systemd timer runs the script. It checks disk space and inodes, memory, CPU load and usage, and the systemd services and local ports you choose, then reports to your healthchecks.io check:
@@ -190,7 +192,7 @@ To automate the setup, write this file first and then answer every installer que
 
 ## Tests
 
-The tests need Linux or WSL with bash and python3 (for a fake healthchecks.io endpoint). They never contact the real healthchecks.io: every HTTPS request is routed to a closed local port.
+The tests need Linux or WSL with bash and python3 (for a fake healthchecks.io endpoint). They never contact the real healthchecks.io: every HTTPS request is routed to a closed local port. GitHub Actions runs them, together with shellcheck, on Ubuntu 22.04 and 24.04 for every push.
 
 ```bash
 bash tests/run-tests.sh           # all tests
