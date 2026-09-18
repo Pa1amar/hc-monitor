@@ -20,6 +20,70 @@ stop_server() {
     rm -rf "$SERVER_DIR"
 }
 
+# make_test_certs: in the current directory, a test CA (ca.pem) and certificates signed by it:
+# good (localhost, ~400 days), soon (localhost, 5 days and 1 hour), expired (2020), other
+# (other.test), plus self (self-signed localhost).
+make_test_certs() {
+    local yesterday
+    yesterday=$(date -u -d '-1 day' +%Y%m%d%H%M%SZ)
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout ca.key -out ca.pem -days 3650 -subj /CN=hc-monitor-test-ca || return 1
+    mkdir db && : > db/index.txt && echo 01 > db/serial
+    cat > ca.cnf <<'EOF'
+[ca]
+default_ca = test
+[test]
+database = db/index.txt
+serial = db/serial
+new_certs_dir = db
+default_md = sha256
+policy = any
+copy_extensions = copy
+unique_subject = no
+[any]
+commonName = supplied
+EOF
+    make_leaf_cert good localhost "$yesterday" "$(date -u -d '+400 days' +%Y%m%d%H%M%SZ)" &&
+        make_leaf_cert soon localhost "$yesterday" "$(date -u -d '+5 days +1 hour' +%Y%m%d%H%M%SZ)" &&
+        make_leaf_cert expired localhost 20200101000000Z 20200102000000Z &&
+        make_leaf_cert other other.test "$yesterday" "$(date -u -d '+400 days' +%Y%m%d%H%M%SZ)" &&
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout self.key -out self.pem -days 400 -subj /CN=localhost \
+            -addext subjectAltName=DNS:localhost
+}
+
+# make_leaf_cert <name> <DNS name> <not before> <not after> — a certificate signed by the test CA.
+make_leaf_cert() {
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$1.key" \
+        -out "$1.csr" -subj "/CN=$2" -addext "subjectAltName=DNS:$2" &&
+        openssl ca -batch -config ca.cnf -cert ca.pem -keyfile ca.key -in "$1.csr" -out "$1.pem" \
+            -startdate "$3" -enddate "$4" -notext
+}
+
+start_tls_server() {
+    TLS_DIR=$(mktemp -d)
+    (cd "$TLS_DIR" && make_test_certs) > "$TLS_DIR/certs.log" 2>&1 ||
+        { echo "cannot create the test certificates:" >&2; cat "$TLS_DIR/certs.log" >&2; exit 1; }
+    python3 "$TESTS_DIR/fake_tls_server.py" "$TLS_DIR" good soon expired other self &
+    TLS_PID=$!
+    local i
+    for i in $(seq 50); do
+        [[ -f $TLS_DIR/ports ]] && break
+        sleep 0.1
+    done
+    [[ -f $TLS_DIR/ports ]] || { echo "the fake TLS server did not start" >&2; exit 1; }
+}
+
+stop_tls_server() {
+    kill "$TLS_PID" 2> /dev/null
+    rm -rf "$TLS_DIR"
+}
+
+# tls_port <name> — the port that serves that test certificate.
+tls_port() {
+    awk -v name="$1" '$1 == name { print $2 }' "$TLS_DIR/ports"
+}
+
 setup() {
     T=$(mktemp -d)
     ROOT_DIR="$T/root"
@@ -161,7 +225,7 @@ make_path_without_curl() {
 
 run_script() {
     local -a cmd=(env -i "HOME=$T" "PATH=$TEST_PATH" "HC_MONITOR_ROOT=$ROOT_DIR"
-        "STUB_DIR=$STUB_DIR" "STUB_BIN=$T/bin" "REAL_CURL=$REAL_CURL"
+        "STUB_DIR=$STUB_DIR" "STUB_BIN=$T/bin" "REAL_CURL=$REAL_CURL" "SSL_CERT_FILE=$TLS_DIR/ca.pem"
         "https_proxy=http://127.0.0.1:9" "HTTPS_PROXY=http://127.0.0.1:9" "no_proxy=127.0.0.1"
         "$BASH" "$RUN_SCRIPT" "$@")
     if [[ -n ${INPUT+set} ]]; then
@@ -215,7 +279,8 @@ assert_calls_in_order() {
 run_all_tests() {
     local filter="$1" name passed=0 failed=0
     start_server
-    trap stop_server EXIT
+    start_tls_server
+    trap 'stop_server; stop_tls_server' EXIT
     for name in $(declare -F | awk '{ print $3 }' | grep '^test_' | grep -e "$filter"); do
         if (
             TEST_FAILED=0

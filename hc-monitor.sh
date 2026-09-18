@@ -54,15 +54,18 @@ unset root_home
 readonly IGNORED_FS=" tmpfs devtmpfs squashfs overlay iso9660 "
 readonly DF_TIMEOUT=10
 readonly HTTP_TIMEOUT=10
+readonly TLS_TIMEOUT=15
 
 # Defaults; /etc/hc-monitor.conf overrides them.
 HC_PING_URL=""
 SERVICES=""
 PORTS=""
+CERTS=""
 DISK_MAX_PCT=90
 MEM_MAX_PCT=90
 LOAD_MAX_PER_CPU=2
 CPU_MAX_PCT=90
+CERT_MIN_DAYS=14
 
 # Settings that only service files use (see load_service).
 HTTP_URL=""
@@ -141,6 +144,16 @@ valid_port() {
     [[ $1 =~ ^([1-9][0-9]{0,4})(/(tcp|udp))?$ ]] && (( BASH_REMATCH[1] <= 65535 ))
 }
 
+# valid_cert_entry <entry>: a DNS name, optionally followed by :port.
+valid_cert_entry() {
+    [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:([1-9][0-9]{0,4}))?$ ]] || return 1
+    [[ -z ${BASH_REMATCH[3]} ]] || (( BASH_REMATCH[3] <= 65535 ))
+}
+
+valid_days() {
+    [[ $1 =~ ^[1-9][0-9]{0,2}$ ]] && (( $1 <= 365 ))
+}
+
 valid_service_name() {
     [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
 }
@@ -168,6 +181,11 @@ validate_config() {
     valid_pct "$MEM_MAX_PCT" || die 2 "invalid MEM_MAX_PCT in $CONF_FILE: $MEM_MAX_PCT"
     valid_load "$LOAD_MAX_PER_CPU" || die 2 "invalid LOAD_MAX_PER_CPU in $CONF_FILE: $LOAD_MAX_PER_CPU"
     valid_pct "$CPU_MAX_PCT" || die 2 "invalid CPU_MAX_PCT in $CONF_FILE: $CPU_MAX_PCT"
+    valid_days "$CERT_MIN_DAYS" || die 2 "invalid CERT_MIN_DAYS in $CONF_FILE: $CERT_MIN_DAYS"
+    split_words "$CERTS"
+    for entry in "${WORDS[@]}"; do
+        valid_cert_entry "$entry" || die 2 "invalid certificate entry in $CONF_FILE: $entry"
+    done
     split_words "$SERVICES"
     for entry in "${WORDS[@]}"; do
         valid_service "$entry" || die 2 "invalid service name in $CONF_FILE: $entry"
@@ -519,6 +537,79 @@ check_http() {
     summary "HTTP $HTTP_URL: $result"
 }
 
+# check_certs: checks every CERTS entry (host or host:port, port 443 by default).
+check_certs() {
+    local entry
+    split_words "$CERTS"
+    (( ${#WORDS[@]} > 0 )) || return 0
+    if ! command -v openssl > /dev/null; then
+        problem "TLS: openssl not found"
+        return
+    fi
+    for entry in "${WORDS[@]}"; do
+        if [[ $entry == *:* ]]; then
+            check_cert "${entry%:*}" "${entry##*:}"
+        else
+            check_cert "$entry" 443
+        fi
+    done
+}
+
+# check_cert <host> <port>: the certificate the host presents, as a client sees it: trusted by
+# the system CAs, issued for that host name and not expiring within CERT_MIN_DAYS days.
+check_cert() {
+    local target="$1:$2" out rc=0 end expires now days left end_day result code="" reason="unknown"
+    local verify_re='Verify return code: ([0-9]+) \(([^)]*)\)'
+    out=$(timeout "$TLS_TIMEOUT" openssl s_client -connect "$target" -servername "$1" \
+        -verify_hostname "$1" < /dev/null 2>&1) || rc=$?
+    end=$(printf '%s\n' "$out" | openssl x509 -noout -enddate 2> /dev/null)
+    end=${end#notAfter=}
+    if [[ -z $end ]]; then
+        if (( rc == 124 )); then
+            result="no response within $TLS_TIMEOUT s"
+        elif [[ $out == *"CONNECTED("* ]]; then
+            result="handshake failed"
+        else
+            result="connection failed"
+        fi
+        problem "TLS $target: $result"
+        summary "TLS $target: $result"
+        return
+    fi
+    expires=$(date -u -d "$end" +%s 2> /dev/null)
+    if [[ ! $expires =~ ^[0-9]+$ ]]; then
+        problem "TLS $target: cannot read the certificate's expiry date"
+        summary "TLS $target: cannot read the expiry date"
+        return
+    fi
+    end_day=$(date -u -d "@$expires" +%F)
+    printf -v now '%(%s)T' -1
+    if (( expires <= now )); then
+        problem "TLS $target: certificate expired on $end_day"
+        summary "TLS $target: expired on $end_day"
+        return
+    fi
+    days=$(( (expires - now) / 86400 ))
+    case $days in
+        0) left="less than a day" ;;
+        1) left="1 day" ;;
+        *) left="$days days" ;;
+    esac
+    if [[ $out =~ $verify_re ]]; then
+        code=${BASH_REMATCH[1]}
+        reason=${BASH_REMATCH[2]}
+    fi
+    if [[ $code == 0 ]]; then
+        summary "TLS $target: valid until $end_day ($left)"
+    else
+        problem "TLS $target: certificate not valid ($reason)"
+        summary "TLS $target: not valid ($reason), expires $end_day ($left)"
+    fi
+    if (( days < CERT_MIN_DAYS )); then
+        problem "TLS $target: certificate expires in $left ($end_day, threshold $CERT_MIN_DAYS days)"
+    fi
+}
+
 run_checks() {
     PROBLEMS=()
     SUMMARY=()
@@ -529,6 +620,7 @@ run_checks() {
     check_cpu
     check_services
     check_ports
+    check_certs
 }
 
 # safe_path <path>: exists, belongs to root (to the current user in tests) and isn't writable by
@@ -552,11 +644,11 @@ list_services() {
 }
 
 # load_service <name>: sources SERVICES_DIR/<name>/.env into HC_PING_URL, SERVICES, PORTS,
-# HTTP_URL and HTTP_EXPECT after checking the permissions; on failure sets SERVICE_ERROR.
+# CERTS, HTTP_URL and HTTP_EXPECT after checking the permissions; on failure sets SERVICE_ERROR.
 # The file may set anything, so call it in a subshell.
 load_service() {
     local file="$SERVICES_DIR/$1/.env" path
-    HC_PING_URL="" SERVICES="" PORTS="" HTTP_URL="" HTTP_EXPECT=""
+    HC_PING_URL="" SERVICES="" PORTS="" CERTS="" HTTP_URL="" HTTP_EXPECT=""
     for path in "$SERVICES_DIR" "$SERVICES_DIR/$1" "$file"; do
         if ! safe_path "$path"; then
             SERVICE_ERROR="unsafe permissions on ${path#"$ROOT"} (it must be owned by root and not writable by group or others)"
@@ -593,6 +685,13 @@ validate_service() {
             return 1
         fi
     done
+    split_words "$CERTS"
+    for entry in "${WORDS[@]}"; do
+        if ! valid_cert_entry "$entry"; then
+            SERVICE_ERROR="invalid certificate entry: $entry"
+            return 1
+        fi
+    done
     if [[ -n $HTTP_URL ]] && ! valid_url "$HTTP_URL"; then
         SERVICE_ERROR="invalid HTTP_URL"
         return 1
@@ -605,8 +704,8 @@ validate_service() {
         SERVICE_ERROR="invalid HTTP_EXPECT (not a regular expression)"
         return 1
     fi
-    if [[ -z $SERVICES && -z $PORTS && -z $HTTP_URL ]]; then
-        SERVICE_ERROR="nothing to check (set SERVICES, PORTS or HTTP_URL)"
+    if [[ -z $SERVICES && -z $PORTS && -z $CERTS && -z $HTTP_URL ]]; then
+        SERVICE_ERROR="nothing to check (set SERVICES, PORTS, CERTS or HTTP_URL)"
         return 1
     fi
 }
@@ -621,7 +720,9 @@ service_lines() {
         SERVICES="${WORDS[*]}"
         split_words "$PORTS"
         PORTS="${WORDS[*]}"
-        for key in HC_PING_URL SERVICES PORTS HTTP_URL HTTP_EXPECT; do
+        split_words "$CERTS"
+        CERTS="${WORDS[*]}"
+        for key in HC_PING_URL SERVICES PORTS CERTS HTTP_URL HTTP_EXPECT; do
             printf 'V\t%s\t%s\n' "$key" "${!key}"
         done
         if ! validate_service; then
@@ -633,6 +734,7 @@ service_lines() {
             RESTARTS_SEEN=()
             [[ -z $SERVICES ]] || check_services
             [[ -z $PORTS ]] || check_ports
+            check_certs
             check_http
             (( ${#PROBLEMS[@]} == 0 )) || printf 'P\t%s\n' "${PROBLEMS[@]}"
             (( ${#SUMMARY[@]} == 0 )) || printf 'S\t%s\n' "${SUMMARY[@]}"
@@ -900,6 +1002,12 @@ check_port_entry() {
     return 1
 }
 
+check_cert_entry() {
+    valid_cert_entry "$1" && return 0
+    echo "Invalid certificate entry: $1 (expected a host name, e.g. example.com or example.com:9001)." >&2
+    return 1
+}
+
 ask_settings() {
     echo "One ping URL per server: create a separate healthchecks.io check for each server." >&2
     ask_valid "healthchecks.io ping URL" "$HC_PING_URL" valid_url \
@@ -911,7 +1019,10 @@ ask_settings() {
     ask_list "Local ports to watch, space-separated: 443 or 443/tcp for TCP, 53/udp for UDP" \
         "$PORTS" check_port_entry
     PORTS="$ANSWER"
-    if confirm "Thresholds: disk $DISK_MAX_PCT%, RAM $MEM_MAX_PCT%, load $LOAD_MAX_PER_CPU per CPU, CPU busy $CPU_MAX_PCT%. Change them? [y/N] " n; then
+    ask_list "TLS certificates to watch, space-separated: host or host:port (443 by default)" \
+        "$CERTS" check_cert_entry
+    CERTS="$ANSWER"
+    if confirm "Thresholds: disk $DISK_MAX_PCT%, RAM $MEM_MAX_PCT%, load $LOAD_MAX_PER_CPU per CPU, CPU busy $CPU_MAX_PCT%, certificates $CERT_MIN_DAYS days. Change them? [y/N] " n; then
         ask_valid "Disk and inode threshold, %" "$DISK_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
         DISK_MAX_PCT="$ANSWER"
         ask_valid "RAM threshold, %" "$MEM_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
@@ -921,6 +1032,9 @@ ask_settings() {
         LOAD_MAX_PER_CPU="$ANSWER"
         ask_valid "CPU busy threshold, %" "$CPU_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
         CPU_MAX_PCT="$ANSWER"
+        ask_valid "Certificate expiry warning, days" "$CERT_MIN_DAYS" valid_days \
+            "Expected a whole number of days from 1 to 365."
+        CERT_MIN_DAYS="$ANSWER"
     fi
 }
 
@@ -933,10 +1047,12 @@ write_config() {
 HC_PING_URL="$HC_PING_URL"
 SERVICES="$SERVICES"
 PORTS="$PORTS"
+CERTS="$CERTS"
 DISK_MAX_PCT="$DISK_MAX_PCT"
 MEM_MAX_PCT="$MEM_MAX_PCT"
 LOAD_MAX_PER_CPU="$LOAD_MAX_PER_CPU"
 CPU_MAX_PCT="$CPU_MAX_PCT"
+CERT_MIN_DAYS="$CERT_MIN_DAYS"
 EOF
     then
         rm -f "$tmp"
@@ -1075,8 +1191,8 @@ shell_quote() {
     printf "%s%s'" "$out" "$s"
 }
 
-# write_service_file <name> <ping URL> <services> <ports> <HTTP URL> <HTTP expect>: saves
-# SERVICES_DIR/<name>/.env (directories 700, file 600).
+# write_service_file <name> <ping URL> <services> <ports> <certificates> <HTTP URL> <HTTP expect>:
+# saves SERVICES_DIR/<name>/.env (directories 700, file 600).
 write_service_file() {
     local dir="$SERVICES_DIR/$1" tmp
     { mkdir -p "$dir" && chmod 700 "$SERVICES_DIR" "$dir"; } || die 1 "cannot create ${dir#"$ROOT"}"
@@ -1086,8 +1202,9 @@ write_service_file() {
         echo "HC_PING_URL=$(shell_quote "$2")"
         echo "SERVICES=$(shell_quote "$3")"
         echo "PORTS=$(shell_quote "$4")"
-        echo "HTTP_URL=$(shell_quote "$5")"
-        echo "HTTP_EXPECT=$(shell_quote "$6")"
+        echo "CERTS=$(shell_quote "$5")"
+        echo "HTTP_URL=$(shell_quote "$6")"
+        echo "HTTP_EXPECT=$(shell_quote "$7")"
     } > "$tmp"; then
         rm -f "$tmp"
         die 1 "cannot write ${tmp#"$ROOT"}"
@@ -1117,7 +1234,7 @@ preview_service() {
 
 cmd_add() {
     local name="$1" line key value error="" loaded=0
-    local url="" services="" ports="" http_url="" http_expect=""
+    local url="" services="" ports="" certs="" http_url="" http_expect=""
     local -a lines
     require_root
     valid_service_name "$name" || die 2 "invalid service name: $name (use letters, digits, '.', '_' and '-')"
@@ -1135,6 +1252,7 @@ cmd_add() {
                         HC_PING_URL) url=$value ;;
                         SERVICES) services=$value ;;
                         PORTS) ports=$value ;;
+                        CERTS) certs=$value ;;
                         HTTP_URL) http_url=$value ;;
                         HTTP_EXPECT) http_expect=$value ;;
                     esac
@@ -1155,6 +1273,9 @@ cmd_add() {
         ask_list "Local ports to watch, space-separated: 443 or 443/tcp for TCP, 53/udp for UDP" \
             "$ports" check_port_entry
         ports=$ANSWER
+        ask_list "TLS certificates to watch, space-separated: host or host:port (443 by default)" \
+            "$certs" check_cert_entry
+        certs=$ANSWER
         ask_optional "Health check URL" "$http_url" valid_url \
             "Expected a URL like http://localhost:8080/health without spaces, quotes, \$, \` or \\."
         http_url=$ANSWER
@@ -1164,10 +1285,10 @@ cmd_add() {
                 "Expected a single-line regular expression, e.g. \"status\" *: *\"up\"."
             http_expect=$ANSWER
         fi
-        [[ -z $services && -z $ports && -z $http_url ]] || break
-        echo "Nothing to check: set at least one service, port or health check URL." >&2
+        [[ -z $services && -z $ports && -z $certs && -z $http_url ]] || break
+        echo "Nothing to check: set at least one service, port, certificate or health check URL." >&2
     done
-    write_service_file "$name" "$url" "$services" "$ports" "$http_url" "$http_expect"
+    write_service_file "$name" "$url" "$services" "$ports" "$certs" "$http_url" "$http_expect"
     echo
     echo "The report for $name will look like this:"
     echo
