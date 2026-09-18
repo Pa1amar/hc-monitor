@@ -48,7 +48,7 @@ A service can also get a file of its own with its units, ports and HTTP health e
    - the systemd services to watch, space-separated (for example `nginx postgresql`) — names that don't exist are rejected;
    - the local ports to watch, space-separated (for example `22 443 53/udp`; a bare number means TCP);
    - the TLS certificates to watch, space-separated (for example `gw.example.com gw.example.com:9001`; a bare host name means port 443);
-   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days).
+   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days, confirm a problem after 2 runs).
 
    For the lists, Enter keeps the current list (none on a fresh install) and `-` clears it.
 
@@ -76,7 +76,18 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 
 A check that can't run — for example `df` hanging for more than 10 seconds — is reported as a problem too, never skipped silently.
 
-Restarts and OOM kills are events, not states: the check goes down for one run and comes back up on the next one if nothing else happened, so you get an alert and, five minutes later, a recovery notice. The first run after installing or rebooting only records the counters.
+A problem is reported only once it has lasted `CONFIRM_RUNS` runs in a row (2 by default, about five minutes), so a one-off hiccup doesn't raise an alarm. Until then the report lists it under `Pending` and the check stays up:
+
+```
+All good
+
+Pending:
+- CPU: 95% busy (threshold 90%) (seen 1 of 2 runs)
+```
+
+A problem stays the same across runs while the text before its first colon does (for example `Disk /var`), even when the figures change; once it's gone, its count starts over. Set `CONFIRM_RUNS="1"` to report problems at once.
+
+Restarts and OOM kills are events, not states, and are reported at once: the check goes down for one run and comes back up on the next one if nothing else happened, so you get an alert and, five minutes later, a recovery notice. The first run after installing or rebooting only records the counters.
 
 Port checks look for a listening socket on any local address, loopback included, so:
 
@@ -177,6 +188,7 @@ sudo bash hc-monitor.sh install
 | `/var/lib/hc-monitor/cpu.stat` | 644 | CPU counters from the previous run, for the average |
 | `/var/lib/hc-monitor/restarts.state` | 644 | restart counts of the watched units from the previous run |
 | `/var/lib/hc-monitor/oom.state` | 644 | the OOM kill count from the previous run |
+| `/var/lib/hc-monitor/confirm.state` | 644 | how many runs in a row each current problem has been seen |
 | `/root/.healthchecks/<name>/.env` | 600 | settings of a service, written by `add` (kept by `uninstall`) |
 
 `/etc/hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits:
@@ -191,6 +203,7 @@ MEM_MAX_PCT="90"
 LOAD_MAX_PER_CPU="2"
 CPU_MAX_PCT="90"
 CERT_MIN_DAYS="14"
+CONFIRM_RUNS="2"
 ```
 
 To automate the setup, write this file first and then answer every installer question with Enter: `yes '' | head -n 20 | sudo bash hc-monitor.sh install`. Each question keeps the value from the file, so the order of the questions doesn't matter; an invalid value makes the installer stop with "input aborted".
