@@ -4,7 +4,7 @@
 
 A single bash script that monitors an Ubuntu server through [healthchecks.io](https://healthchecks.io/).
 
-Every 5 minutes a systemd timer runs the script. It checks disk space and inodes, memory, CPU load and usage, and the systemd services and local ports you choose, then reports to your healthchecks.io check:
+Every 5 minutes a systemd timer runs the script. It checks disk space and inodes, memory and OOM kills, CPU load and usage, and the systemd services (including their automatic restarts) and local ports you choose, then reports to your healthchecks.io check:
 
 - **all good** — a regular ping with a short summary;
 - **something is wrong** — a ping to `<ping-url>/fail` with the list of problems, so the check goes down and healthchecks.io alerts you right away;
@@ -64,12 +64,16 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 |---|---|---|
 | Disk space and inodes | usage ≥ `DISK_MAX_PCT` on any local filesystem | `tmpfs`, `devtmpfs`, `squashfs` (snaps), `overlay` (Docker) and `iso9660` are skipped |
 | Memory | used ≥ `MEM_MAX_PCT` | based on `MemAvailable`, so page cache doesn't count as used |
+| OOM kills | the kernel's OOM killer killed a process since the previous run | counted by `oom_kill` in `/proc/vmstat`; process names come from the kernel log |
 | CPU load | 15-minute load average ≥ CPU cores × `LOAD_MAX_PER_CPU` | the long window ignores short spikes |
 | CPU usage | busy ≥ `CPU_MAX_PCT`, averaged since the previous run | busy = 100% − idle − iowait; steal (time taken by the hypervisor) counts as busy and is shown separately |
 | Services | a listed unit is not `active` or `reloading` | a unit that doesn't exist is reported separately, so a typo doesn't look like a crash |
+| Restarts | a listed unit was restarted automatically since the previous run | systemd's `NRestarts` counter: catches a service that crashes and comes back between checks; a manual restart resets it and raises no alarm |
 | Ports | a listed local TCP or UDP port has no listening socket | read from `/proc/net`; `443` means TCP, `53/udp` means UDP; any local address counts (see below) |
 
 A check that can't run — for example `df` hanging for more than 10 seconds — is reported as a problem too, never skipped silently.
+
+Restarts and OOM kills are events, not states: the check goes down for one run and comes back up on the next one if nothing else happened, so you get an alert and, five minutes later, a recovery notice. The first run after installing or rebooting only records the counters.
 
 Port checks look for a listening socket on any local address, loopback included, so:
 
@@ -166,6 +170,8 @@ sudo bash hc-monitor.sh install
 | `/etc/systemd/system/hc-monitor.service` | 644 | oneshot unit that runs the script |
 | `/etc/systemd/system/hc-monitor.timer` | 644 | runs the unit every 5 minutes (`OnCalendar=*:0/5`) |
 | `/var/lib/hc-monitor/cpu.stat` | 644 | CPU counters from the previous run, for the average |
+| `/var/lib/hc-monitor/restarts.state` | 644 | restart counts of the watched units from the previous run |
+| `/var/lib/hc-monitor/oom.state` | 644 | the OOM kill count from the previous run |
 | `/root/.healthchecks/<name>/.env` | 600 | settings of a service, written by `add` (kept by `uninstall`) |
 
 `/etc/hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits:

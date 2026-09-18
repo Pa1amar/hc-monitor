@@ -192,12 +192,15 @@ test_uninstall_yes_removes_everything() {
     INPUT=$'\n\n\n'
     run_script install
     assert_rc 0
+    add_restarts_state . nginx 1
+    set_oom_state 0 0
     : > "$CALLS"
     INPUT=$'y\n'
     run_script uninstall
     assert_rc 0
     local f
     for f in etc/hc-monitor.conf usr/local/bin/hc-monitor.sh var/lib/hc-monitor/cpu.stat \
+        var/lib/hc-monitor/restarts.state var/lib/hc-monitor/oom.state \
         etc/systemd/system/hc-monitor.service etc/systemd/system/hc-monitor.timer; do
         [[ ! -e $ROOT_DIR/$f ]] || fail "/$f was not removed"
     done

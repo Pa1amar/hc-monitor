@@ -37,8 +37,11 @@ readonly MEMINFO="$ROOT/proc/meminfo"
 readonly LOADAVG="$ROOT/proc/loadavg"
 readonly PROC_NET="$ROOT/proc/net"
 readonly PROC_STAT="$ROOT/proc/stat"
-readonly CPU_STATE_DIR="$ROOT/var/lib/hc-monitor"
-readonly CPU_STATE="$CPU_STATE_DIR/cpu.stat"
+readonly STATE_DIR="$ROOT/var/lib/hc-monitor"
+readonly CPU_STATE="$STATE_DIR/cpu.stat"
+readonly RESTARTS_STATE="$STATE_DIR/restarts.state"
+readonly OOM_STATE="$STATE_DIR/oom.state"
+readonly VMSTAT="$ROOT/proc/vmstat"
 readonly CPU_MAX_AGE=900   # seconds; an older saved sample is not used for the average
 
 # Service files live in root's home: the timer runs as root, and systemd doesn't set $HOME.
@@ -69,6 +72,7 @@ PROBLEMS=()
 SUMMARY=()
 WORDS=()
 CPU_SAMPLE=""
+OOM_SAMPLE=""
 SERVICE_ERROR=""
 
 # Reports to send: index 0 is the server, then services with their own check.
@@ -76,6 +80,12 @@ REPORT_NAMES=()
 REPORT_URLS=()
 REPORT_BODIES=()
 REPORT_PROBLEMS=()
+
+# Automatic restart counts keyed "<context>/<unit>", where the context is "." for the server
+# and the service name for a service file: saved by the previous run and seen in this one.
+RESTART_CONTEXT="."
+declare -A RESTARTS_SAVED=()
+declare -A RESTARTS_SEEN=()
 
 die() {
     local code="$1"
@@ -227,6 +237,44 @@ check_memory() {
     fi
 }
 
+# check_oom: processes the kernel's OOM killer killed since the previous run (the oom_kill
+# counter in /proc/vmstat), named from the kernel log when possible; leaves this run's count in
+# OOM_SAMPLE for save_state.
+check_oom() {
+    local count saved="" now n names word=processes
+    OOM_SAMPLE=""
+    count=$(awk '$1 == "oom_kill" { print $2; exit }' "$VMSTAT" 2> /dev/null)
+    if [[ ! $count =~ ^[0-9]+$ ]]; then
+        problem "OOM: cannot determine (no oom_kill in /proc/vmstat)"
+        return
+    fi
+    printf -v now '%(%s)T' -1
+    OOM_SAMPLE="$now $count"
+    { read -r saved < "$OOM_STATE"; } 2> /dev/null
+    [[ $saved =~ ^[0-9]+\ [0-9]+$ ]] || return 0   # the first run only records a baseline
+    (( count > ${saved#* } )) || return 0            # no kills, or the counter restarted at boot
+    n=$(( count - ${saved#* } ))
+    (( n == 1 )) && word=process
+    names=$(oom_victims "${saved% *}")
+    problem "OOM killer: killed $n $word since the last check${names:+: $names}"
+}
+
+# oom_victims <epoch>: "name (pid), ..." for the processes the OOM killer killed since then,
+# as the kernel log names them; empty when the log can't be read.
+oom_victims() {
+    journalctl -k -q --no-pager -o cat --since "@$1" 2> /dev/null | awk '
+        match($0, /Killed process [0-9]+ \([^)]*\)/) {
+            victim = substr($0, RSTART + 15, RLENGTH - 15)
+            pid = victim
+            sub(/ .*/, "", pid)
+            name = victim
+            sub(/^[0-9]+ \(/, "", name)
+            sub(/\)$/, "", name)
+            list = list (list == "" ? "" : ", ") name " (" pid ")"
+        }
+        END { printf "%s", list }'
+}
+
 check_load() {
     local l1="" l5="" l15="" cpus limit
     if [[ -r $LOADAVG ]]; then
@@ -258,7 +306,7 @@ cpu_counters() {
 }
 
 # check_cpu: CPU busy share since the previous run (or over one second when there is no usable
-# saved sample); leaves this run's counters in CPU_SAMPLE for save_cpu_sample.
+# saved sample); leaves this run's counters in CPU_SAMPLE for save_state.
 check_cpu() {
     local cur saved="" now elapsed span d_total busy total idle iowait steal
     local p_time=0 p_total=0 p_idle=0 p_iowait=0 p_steal=0
@@ -310,10 +358,18 @@ check_cpu() {
     fi
 }
 
-# save_cpu_sample: keeps this run's CPU counters for the next run's average (real runs only).
-save_cpu_sample() {
-    [[ -n $CPU_SAMPLE ]] || return 0
-    { mkdir -p "$CPU_STATE_DIR" && echo "$CPU_SAMPLE" > "$CPU_STATE"; } 2> /dev/null
+# save_state: keeps this run's CPU counters, restart counts and OOM kill count for the next run
+# (real runs only; failures are ignored).
+save_state() {
+    local key
+    {
+        mkdir -p "$STATE_DIR" || return 0
+        [[ -z $CPU_SAMPLE ]] || echo "$CPU_SAMPLE" > "$CPU_STATE"
+        [[ -z $OOM_SAMPLE ]] || echo "$OOM_SAMPLE" > "$OOM_STATE"
+        for key in "${!RESTARTS_SEEN[@]}"; do
+            printf '%s\t%s\t%s\n' "${key%%/*}" "${key#*/}" "${RESTARTS_SEEN[$key]}"
+        done > "$RESTARTS_STATE.tmp" && mv -f "$RESTARTS_STATE.tmp" "$RESTARTS_STATE"
+    } 2> /dev/null
     return 0
 }
 
@@ -336,9 +392,36 @@ check_services() {
                 problem "Service $svc: $state"
             fi
         fi
+        check_restarts "$svc"
         items+=("$svc=$state")
     done
     summary "Services: $(join_by ', ' "${items[@]}")"
+}
+
+# load_restarts_state: reads the restart counts saved by the previous run into RESTARTS_SAVED.
+load_restarts_state() {
+    local context unit count
+    RESTARTS_SAVED=()
+    RESTARTS_SEEN=()
+    [[ -r $RESTARTS_STATE ]] || return 0
+    while IFS=$'\t' read -r context unit count; do
+        [[ $count =~ ^[0-9]+$ ]] && RESTARTS_SAVED["$context/$unit"]=$count
+    done < "$RESTARTS_STATE"
+}
+
+# check_restarts <unit>: compares the unit's automatic restart count with the one the previous
+# run saved for this check (RESTART_CONTEXT) and remembers the current count.
+check_restarts() {
+    local key="$RESTART_CONTEXT/$1" count saved n word=times
+    count=$(systemctl show -p NRestarts --value "$1" 2> /dev/null)
+    [[ $count =~ ^[0-9]+$ ]] || return 0
+    RESTARTS_SEEN[$key]=$count
+    saved=${RESTARTS_SAVED[$key]:-}
+    if [[ -n $saved ]] && (( count > saved )); then
+        n=$(( count - saved ))
+        (( n == 1 )) && word="time"
+        problem "Service $1: restarted $n $word since the last check"
+    fi
 }
 
 # listening_ports <tcp|udp>: prints " port port ... " for sockets that listen on this protocol
@@ -441,6 +524,7 @@ run_checks() {
     SUMMARY=()
     check_disk
     check_memory
+    check_oom
     check_load
     check_cpu
     check_services
@@ -545,11 +629,16 @@ service_lines() {
         elif [[ ${2:-} == check ]]; then
             PROBLEMS=()
             SUMMARY=()
+            RESTART_CONTEXT=$1
+            RESTARTS_SEEN=()
             [[ -z $SERVICES ]] || check_services
             [[ -z $PORTS ]] || check_ports
             check_http
             (( ${#PROBLEMS[@]} == 0 )) || printf 'P\t%s\n' "${PROBLEMS[@]}"
             (( ${#SUMMARY[@]} == 0 )) || printf 'S\t%s\n' "${SUMMARY[@]}"
+            for key in "${!RESTARTS_SEEN[@]}"; do
+                printf 'R\t%s\t%s\n' "${key#*/}" "${RESTARTS_SEEN[$key]}"
+            done
         fi
     else
         printf 'E\t%s\n' "$SERVICE_ERROR"
@@ -562,7 +651,7 @@ service_lines() {
 # PROBLEMS and SUMMARY with a "[name] " prefix. A service that can't be used is a server problem.
 add_service_report() {
     local name="$1" line kind value url="" error="" complete=0 item
-    local -a lines problems=() summaries=()
+    local -a lines problems=() summaries=() restarts=()
     mapfile -t lines < <(service_lines "$name" check)
     for line in "${lines[@]}"; do
         kind=${line%%$'\t'*}
@@ -572,6 +661,7 @@ add_service_report() {
             E) error=$value ;;
             P) problems+=("$value") ;;
             S) summaries+=("$value") ;;
+            R) restarts+=("$value") ;;
             END) complete=1 ;;
         esac
     done
@@ -582,7 +672,12 @@ add_service_report() {
     fi
     if [[ -n $error ]]; then
         problem "Service $name: $error"
-    elif [[ -n $url ]]; then
+        return
+    fi
+    for item in "${restarts[@]}"; do
+        RESTARTS_SEEN["$name/${item%%$'\t'*}"]=${item#*$'\t'}
+    done
+    if [[ -n $url ]]; then
         add_report "$name" "$url" "${#problems[@]}" "${problems[@]}" "${summaries[@]}"
     else
         for item in "${problems[@]}"; do
@@ -613,6 +708,8 @@ collect_reports() {
     REPORT_URLS=("")
     REPORT_BODIES=("")
     REPORT_PROBLEMS=("")
+    load_restarts_state
+    RESTART_CONTEXT="."
     run_checks
     list_services
     names=("${WORDS[@]}")
@@ -693,7 +790,7 @@ cmd_run() {
     load_config
     validate_config
     collect_reports
-    save_cpu_sample
+    save_state
     send_reports
 }
 
@@ -950,8 +1047,8 @@ cmd_uninstall() {
     rm -f "$UNIT_DIR/hc-monitor.service" "$UNIT_DIR/hc-monitor.timer"
     systemctl daemon-reload 2> /dev/null
     systemctl reset-failed hc-monitor.service 2> /dev/null
-    rm -f "$CONF_FILE" "$BIN_FILE" "$CPU_STATE"
-    rmdir "$CPU_STATE_DIR" 2> /dev/null
+    rm -f "$CONF_FILE" "$BIN_FILE" "$CPU_STATE" "$RESTARTS_STATE" "$OOM_STATE"
+    rmdir "$STATE_DIR" 2> /dev/null
     echo "hc-monitor removed."
     echo "Pings have stopped: pause or delete the check in healthchecks.io, otherwise it will report the server as down."
     list_services
@@ -1007,6 +1104,7 @@ preview_service() {
     REPORT_PROBLEMS=("")
     PROBLEMS=()
     SUMMARY=()
+    load_restarts_state
     add_service_report "$1"
     if (( ${#REPORT_URLS[@]} > 1 )); then
         printf 'Ping URL: %s\n\n%s\n' "${REPORT_URLS[1]}" "${REPORT_BODIES[1]}"

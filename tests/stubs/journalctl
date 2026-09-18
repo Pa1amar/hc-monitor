@@ -1,0 +1,5 @@
+#!/bin/bash
+# journalctl stub: logs the call and prints $STUB_DIR/journal.out (the kernel log) if it exists.
+echo "journalctl $*" >> "$STUB_DIR/calls.log"
+cat "$STUB_DIR/journal.out" 2> /dev/null
+exit 0
