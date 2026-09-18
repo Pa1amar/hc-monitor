@@ -41,6 +41,7 @@ readonly STATE_DIR="$ROOT/var/lib/hc-monitor"
 readonly CPU_STATE="$STATE_DIR/cpu.stat"
 readonly RESTARTS_STATE="$STATE_DIR/restarts.state"
 readonly OOM_STATE="$STATE_DIR/oom.state"
+readonly CONFIRM_STATE="$STATE_DIR/confirm.state"
 readonly VMSTAT="$ROOT/proc/vmstat"
 readonly CPU_MAX_AGE=900   # seconds; an older saved sample is not used for the average
 
@@ -66,12 +67,18 @@ MEM_MAX_PCT=90
 LOAD_MAX_PER_CPU=2
 CPU_MAX_PCT=90
 CERT_MIN_DAYS=14
+CONFIRM_RUNS=2
 
 # Settings that only service files use (see load_service).
 HTTP_URL=""
 HTTP_EXPECT=""
 
+# The report being built: problems (states, confirmed by apply_confirmation), events (reported at
+# once), pending problems with how many runs in a row they have been seen, and summary lines.
 PROBLEMS=()
+EVENTS=()
+PENDING=()
+PENDING_COUNTS=()
 SUMMARY=()
 WORDS=()
 CPU_SAMPLE=""
@@ -83,6 +90,12 @@ REPORT_NAMES=()
 REPORT_URLS=()
 REPORT_BODIES=()
 REPORT_PROBLEMS=()
+REPORT_PENDING=()
+
+# How many runs in a row each problem has been seen, keyed "<context>/<problem key>" (see
+# apply_confirmation): saved by the previous run and counted in this one.
+declare -A CONFIRM_SAVED=()
+declare -A CONFIRM_SEEN=()
 
 # Automatic restart counts keyed "<context>/<unit>", where the context is "." for the server
 # and the service name for a service file: saved by the previous run and seen in this one.
@@ -154,6 +167,10 @@ valid_days() {
     [[ $1 =~ ^[1-9][0-9]{0,2}$ ]] && (( $1 <= 365 ))
 }
 
+valid_runs() {
+    [[ $1 =~ ^([1-9]|10)$ ]]
+}
+
 valid_service_name() {
     [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
 }
@@ -182,6 +199,7 @@ validate_config() {
     valid_load "$LOAD_MAX_PER_CPU" || die 2 "invalid LOAD_MAX_PER_CPU in $CONF_FILE: $LOAD_MAX_PER_CPU"
     valid_pct "$CPU_MAX_PCT" || die 2 "invalid CPU_MAX_PCT in $CONF_FILE: $CPU_MAX_PCT"
     valid_days "$CERT_MIN_DAYS" || die 2 "invalid CERT_MIN_DAYS in $CONF_FILE: $CERT_MIN_DAYS"
+    valid_runs "$CONFIRM_RUNS" || die 2 "invalid CONFIRM_RUNS in $CONF_FILE: $CONFIRM_RUNS"
     split_words "$CERTS"
     for entry in "${WORDS[@]}"; do
         valid_cert_entry "$entry" || die 2 "invalid certificate entry in $CONF_FILE: $entry"
@@ -196,8 +214,15 @@ validate_config() {
     done
 }
 
+# problem <text>: something wrong now, reported once it has lasted CONFIRM_RUNS runs; the text
+# before the first ": " identifies it across runs.
 problem() {
     PROBLEMS+=("$1")
+}
+
+# event <text>: something that happened since the previous run, reported at once.
+event() {
+    EVENTS+=("$1")
 }
 
 summary() {
@@ -274,7 +299,7 @@ check_oom() {
     n=$(( count - ${saved#* } ))
     (( n == 1 )) && word=process
     names=$(oom_victims "${saved% *}")
-    problem "OOM killer: killed $n $word since the last check${names:+: $names}"
+    event "OOM killer: killed $n $word since the last check${names:+: $names}"
 }
 
 # oom_victims <epoch>: "name (pid), ..." for the processes the OOM killer killed since then,
@@ -376,8 +401,8 @@ check_cpu() {
     fi
 }
 
-# save_state: keeps this run's CPU counters, restart counts and OOM kill count for the next run
-# (real runs only; failures are ignored).
+# save_state: keeps this run's CPU counters, restart counts, OOM kill count and problem counts for
+# the next run (real runs only; failures are ignored).
 save_state() {
     local key
     {
@@ -387,8 +412,51 @@ save_state() {
         for key in "${!RESTARTS_SEEN[@]}"; do
             printf '%s\t%s\t%s\n' "${key%%/*}" "${key#*/}" "${RESTARTS_SEEN[$key]}"
         done > "$RESTARTS_STATE.tmp" && mv -f "$RESTARTS_STATE.tmp" "$RESTARTS_STATE"
+        for key in "${!CONFIRM_SEEN[@]}"; do
+            printf '%s\t%s\t%s\n' "${key%%/*}" "${key#*/}" "${CONFIRM_SEEN[$key]}"
+        done > "$CONFIRM_STATE.tmp" && mv -f "$CONFIRM_STATE.tmp" "$CONFIRM_STATE"
     } 2> /dev/null
     return 0
+}
+
+# load_confirm_state: reads how many runs in a row the previous run had seen each problem.
+load_confirm_state() {
+    local context key count
+    CONFIRM_SAVED=()
+    CONFIRM_SEEN=()
+    [[ -r $CONFIRM_STATE ]] || return 0
+    while IFS=$'\t' read -r context key count; do
+        [[ $count =~ ^[0-9]+$ ]] && CONFIRM_SAVED["$context/$key"]=$count
+    done < "$CONFIRM_STATE"
+}
+
+# apply_confirmation <context>: for the report being built ("." is the server, otherwise the
+# service with its own check), keeps in PROBLEMS the problems seen in CONFIRM_RUNS runs in a row
+# and moves the others to PENDING (with their counts in PENDING_COUNTS); then appends the EVENTS,
+# which never wait. A problem's key is its text before the first ": ", so it survives changing
+# figures; a key is counted once per run.
+apply_confirmation() {
+    local context=$1 text key count
+    local -a confirmed=()
+    local -A counted=()
+    PENDING=()
+    PENDING_COUNTS=()
+    for text in "${PROBLEMS[@]}"; do
+        key="$context/${text%%: *}"
+        if [[ -z ${counted[$key]+set} ]]; then
+            counted[$key]=1
+            count=${CONFIRM_SAVED[$key]:-0}
+            CONFIRM_SEEN[$key]=$(( count + 1 ))
+        fi
+        count=${CONFIRM_SEEN[$key]}
+        if (( count >= CONFIRM_RUNS )); then
+            confirmed+=("$text")
+        else
+            PENDING+=("$text")
+            PENDING_COUNTS+=("$count")
+        fi
+    done
+    PROBLEMS=("${confirmed[@]}" "${EVENTS[@]}")
 }
 
 check_services() {
@@ -438,7 +506,7 @@ check_restarts() {
     if [[ -n $saved ]] && (( count > saved )); then
         n=$(( count - saved ))
         (( n == 1 )) && word="time"
-        problem "Service $1: restarted $n $word since the last check"
+        event "Service $1: restarted $n $word since the last check"
     fi
 }
 
@@ -612,6 +680,7 @@ check_cert() {
 
 run_checks() {
     PROBLEMS=()
+    EVENTS=()
     SUMMARY=()
     check_disk
     check_memory
@@ -711,8 +780,9 @@ validate_service() {
 }
 
 # service_lines <name> [check]: loads a service and prints tab-separated lines: "V <key> <value>"
-# for each setting, "E <error>" when the service can't be used and, with "check", "P <problem>"
-# and "S <summary>" from its checks; "END" comes last. Run it in a subshell.
+# for each setting, "E <error>" when the service can't be used and, with "check", "P <problem>",
+# "X <event>", "S <summary>" and "R <unit> <restart count>" from its checks; "END" comes last.
+# Run it in a subshell.
 service_lines() {
     local key
     if load_service "$1"; then
@@ -729,6 +799,7 @@ service_lines() {
             printf 'E\t%s\n' "$SERVICE_ERROR"
         elif [[ ${2:-} == check ]]; then
             PROBLEMS=()
+            EVENTS=()
             SUMMARY=()
             RESTART_CONTEXT=$1
             RESTARTS_SEEN=()
@@ -737,6 +808,7 @@ service_lines() {
             check_certs
             check_http
             (( ${#PROBLEMS[@]} == 0 )) || printf 'P\t%s\n' "${PROBLEMS[@]}"
+            (( ${#EVENTS[@]} == 0 )) || printf 'X\t%s\n' "${EVENTS[@]}"
             (( ${#SUMMARY[@]} == 0 )) || printf 'S\t%s\n' "${SUMMARY[@]}"
             for key in "${!RESTARTS_SEEN[@]}"; do
                 printf 'R\t%s\t%s\n' "${key#*/}" "${RESTARTS_SEEN[$key]}"
@@ -749,11 +821,12 @@ service_lines() {
 }
 
 # add_service_report <name>: runs a service's checks in a subshell. A service with its own
-# HC_PING_URL gets its own report in REPORT_*; otherwise its problems and summary go into
-# PROBLEMS and SUMMARY with a "[name] " prefix. A service that can't be used is a server problem.
+# HC_PING_URL gets its own report in REPORT_*; otherwise its problems, events and summary go
+# into PROBLEMS, EVENTS and SUMMARY with a "[name] " prefix. A service that can't be used is a
+# server problem.
 add_service_report() {
     local name="$1" line kind value url="" error="" complete=0 item
-    local -a lines problems=() summaries=() restarts=()
+    local -a lines problems=() events=() summaries=() restarts=()
     mapfile -t lines < <(service_lines "$name" check)
     for line in "${lines[@]}"; do
         kind=${line%%$'\t'*}
@@ -762,6 +835,7 @@ add_service_report() {
             V) [[ $value == HC_PING_URL$'\t'* ]] && url=${value#*$'\t'} ;;
             E) error=$value ;;
             P) problems+=("$value") ;;
+            X) events+=("$value") ;;
             S) summaries+=("$value") ;;
             R) restarts+=("$value") ;;
             END) complete=1 ;;
@@ -780,10 +854,14 @@ add_service_report() {
         RESTARTS_SEEN["$name/${item%%$'\t'*}"]=${item#*$'\t'}
     done
     if [[ -n $url ]]; then
-        add_report "$name" "$url" "${#problems[@]}" "${problems[@]}" "${summaries[@]}"
+        add_report "$name" "$url" "${#problems[@]}" "${#events[@]}" \
+            "${problems[@]}" "${events[@]}" "${summaries[@]}"
     else
         for item in "${problems[@]}"; do
             problem "[$name] $item"
+        done
+        for item in "${events[@]}"; do
+            event "[$name] $item"
         done
         for item in "${summaries[@]}"; do
             summary "[$name] $item"
@@ -791,18 +869,22 @@ add_service_report() {
     fi
 }
 
-# add_report <name> <ping URL> <problem count> <problem>... <summary line>...: appends a
-# service's report to REPORT_*.
+# add_report <name> <ping URL> <problem count> <event count> <problem>... <event>...
+# <summary line>...: confirms the problems of a service with its own check and appends its
+# report to REPORT_*.
 add_report() {
-    local -a PROBLEMS=("${@:4:$3}") SUMMARY=("${@:$((4 + $3))}")
+    local -a PROBLEMS=("${@:5:$3}") EVENTS=("${@:$((5 + $3)):$4}") SUMMARY=("${@:$((5 + $3 + $4))}")
+    local -a PENDING=() PENDING_COUNTS=()
+    apply_confirmation "$1"
     REPORT_NAMES+=("$1")
     REPORT_URLS+=("$(report_url "$2")")
     REPORT_BODIES+=("$(build_report "$1")")
     REPORT_PROBLEMS+=("$(join_by '; ' "${PROBLEMS[@]}")")
+    REPORT_PENDING+=("$(join_by '; ' "${PENDING[@]}")")
 }
 
 # collect_reports: runs the server checks and the checks of every service. Fills REPORT_NAMES,
-# REPORT_URLS, REPORT_BODIES and REPORT_PROBLEMS; index 0 is the server report.
+# REPORT_URLS, REPORT_BODIES, REPORT_PROBLEMS and REPORT_PENDING; index 0 is the server report.
 collect_reports() {
     local name
     local -a names
@@ -810,7 +892,9 @@ collect_reports() {
     REPORT_URLS=("")
     REPORT_BODIES=("")
     REPORT_PROBLEMS=("")
+    REPORT_PENDING=("")
     load_restarts_state
+    load_confirm_state
     RESTART_CONTEXT="."
     run_checks
     list_services
@@ -822,18 +906,27 @@ collect_reports() {
             problem "Service \"$name\": invalid name (use letters, digits, '.', '_' and '-')"
         fi
     done
+    apply_confirmation "."
     REPORT_URLS[0]=$(report_url "$HC_PING_URL")
     REPORT_BODIES[0]=$(build_report)
     REPORT_PROBLEMS[0]=$(join_by '; ' "${PROBLEMS[@]}")
+    REPORT_PENDING[0]=$(join_by '; ' "${PENDING[@]}")
 }
 
-# build_report [service name]: the report text from PROBLEMS and SUMMARY.
+# build_report [service name]: the report text from PROBLEMS, PENDING and SUMMARY.
 build_report() {
+    local i
     if (( ${#PROBLEMS[@]} > 0 )); then
         printf 'PROBLEMS (%d):\n' "${#PROBLEMS[@]}"
         printf -- '- %s\n' "${PROBLEMS[@]}"
     else
         printf 'All good\n'
+    fi
+    if (( ${#PENDING[@]} > 0 )); then
+        printf '\nPending:\n'
+        for i in "${!PENDING[@]}"; do
+            printf -- '- %s (seen %d of %d runs)\n' "${PENDING[i]}" "${PENDING_COUNTS[i]}" "$CONFIRM_RUNS"
+        done
     fi
     printf '\nHost: %s\n' "$(uname -n)"
     if [[ -n ${1:-} ]]; then
@@ -873,7 +966,7 @@ send_reports() {
         elif [[ -n ${REPORT_PROBLEMS[i]} ]]; then
             echo "${prefix}PROBLEMS: ${REPORT_PROBLEMS[i]} (report sent to /fail)"
         else
-            echo "${prefix}OK: report sent"
+            echo "${prefix}OK: report sent${REPORT_PENDING[i]:+ (pending: ${REPORT_PENDING[i]})}"
         fi
     done
     return "$failed"
@@ -1022,7 +1115,7 @@ ask_settings() {
     ask_list "TLS certificates to watch, space-separated: host or host:port (443 by default)" \
         "$CERTS" check_cert_entry
     CERTS="$ANSWER"
-    if confirm "Thresholds: disk $DISK_MAX_PCT%, RAM $MEM_MAX_PCT%, load $LOAD_MAX_PER_CPU per CPU, CPU busy $CPU_MAX_PCT%, certificates $CERT_MIN_DAYS days. Change them? [y/N] " n; then
+    if confirm "Thresholds: disk $DISK_MAX_PCT%, RAM $MEM_MAX_PCT%, load $LOAD_MAX_PER_CPU per CPU, CPU busy $CPU_MAX_PCT%, certificates $CERT_MIN_DAYS days, confirm after $CONFIRM_RUNS runs. Change them? [y/N] " n; then
         ask_valid "Disk and inode threshold, %" "$DISK_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
         DISK_MAX_PCT="$ANSWER"
         ask_valid "RAM threshold, %" "$MEM_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
@@ -1035,6 +1128,9 @@ ask_settings() {
         ask_valid "Certificate expiry warning, days" "$CERT_MIN_DAYS" valid_days \
             "Expected a whole number of days from 1 to 365."
         CERT_MIN_DAYS="$ANSWER"
+        ask_valid "Confirm a problem after this many runs in a row (1 = at once)" "$CONFIRM_RUNS" valid_runs \
+            "Expected a whole number from 1 to 10."
+        CONFIRM_RUNS="$ANSWER"
     fi
 }
 
@@ -1053,6 +1149,7 @@ MEM_MAX_PCT="$MEM_MAX_PCT"
 LOAD_MAX_PER_CPU="$LOAD_MAX_PER_CPU"
 CPU_MAX_PCT="$CPU_MAX_PCT"
 CERT_MIN_DAYS="$CERT_MIN_DAYS"
+CONFIRM_RUNS="$CONFIRM_RUNS"
 EOF
     then
         rm -f "$tmp"
@@ -1163,7 +1260,7 @@ cmd_uninstall() {
     rm -f "$UNIT_DIR/hc-monitor.service" "$UNIT_DIR/hc-monitor.timer"
     systemctl daemon-reload 2> /dev/null
     systemctl reset-failed hc-monitor.service 2> /dev/null
-    rm -f "$CONF_FILE" "$BIN_FILE" "$CPU_STATE" "$RESTARTS_STATE" "$OOM_STATE"
+    rm -f "$CONF_FILE" "$BIN_FILE" "$CPU_STATE" "$RESTARTS_STATE" "$OOM_STATE" "$CONFIRM_STATE"
     rmdir "$STATE_DIR" 2> /dev/null
     echo "hc-monitor removed."
     echo "Pings have stopped: pause or delete the check in healthchecks.io, otherwise it will report the server as down."
@@ -1215,19 +1312,27 @@ write_service_file() {
 # preview_service <name>: prints what the service adds: its own report or its lines in the
 # server report.
 preview_service() {
+    local i
     REPORT_NAMES=("")
     REPORT_URLS=("")
     REPORT_BODIES=("")
     REPORT_PROBLEMS=("")
+    REPORT_PENDING=("")
     PROBLEMS=()
+    EVENTS=()
     SUMMARY=()
     load_restarts_state
+    load_confirm_state
     add_service_report "$1"
     if (( ${#REPORT_URLS[@]} > 1 )); then
         printf 'Ping URL: %s\n\n%s\n' "${REPORT_URLS[1]}" "${REPORT_BODIES[1]}"
     else
+        apply_confirmation "."
         echo "Added to the server report:"
         (( ${#PROBLEMS[@]} == 0 )) || printf -- '- %s\n' "${PROBLEMS[@]}"
+        for i in "${!PENDING[@]}"; do
+            printf -- '- %s (seen %d of %d runs)\n' "${PENDING[i]}" "${PENDING_COUNTS[i]}" "$CONFIRM_RUNS"
+        done
         (( ${#SUMMARY[@]} == 0 )) || printf '%s\n' "${SUMMARY[@]}"
     fi
 }

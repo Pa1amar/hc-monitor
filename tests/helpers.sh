@@ -179,6 +179,13 @@ add_restarts_state() {
     printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/var/lib/hc-monitor/restarts.state"
 }
 
+# add_confirm_state <context> <key> <count> — how many runs in a row the previous run had seen a
+# problem (context "." is the server, otherwise a service name).
+add_confirm_state() {
+    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/var/lib/hc-monitor/confirm.state"
+}
+
 # use_sleep_stub <user nice system idle iowait irq softirq steal> — `sleep` rewrites /proc/stat
 # with these counters and returns at once, so the one-second CPU sample is instant and exact.
 use_sleep_stub() {
@@ -186,8 +193,10 @@ use_sleep_stub() {
     chmod +x "$T/bin/sleep"
 }
 
+# write_conf <line>... — the main config. Tests see problems at once (CONFIRM_RUNS="1") unless the
+# lines set CONFIRM_RUNS themselves: a later assignment wins.
 write_conf() {
-    printf '%s\n' "$@" > "$ROOT_DIR/etc/hc-monitor.conf"
+    printf '%s\n' 'CONFIRM_RUNS="1"' "$@" > "$ROOT_DIR/etc/hc-monitor.conf"
 }
 
 # add_service <name> <line>... — writes <root home>/.healthchecks/<name>/.env (directories 700, file 600).

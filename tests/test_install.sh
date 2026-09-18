@@ -24,6 +24,7 @@ test_install_fresh() {
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="2"'
     assert_contains "$conf" 'CPU_MAX_PCT="90"'
     assert_contains "$conf" 'CERT_MIN_DAYS="14"'
+    assert_contains "$conf" 'CONFIRM_RUNS="2"'
     assert_contains "$OUT" "TLS $cert: valid until"
     assert_mode "$ROOT_DIR/usr/local/bin/hc-monitor.sh" 700
     cmp -s "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh" || fail "the installed copy differs from the original"
@@ -69,25 +70,28 @@ test_install_reprompts_bad_url_and_unknown_service() {
 }
 
 test_install_changes_thresholds() {
-    INPUT=$'\n\n\n\ny\n101\n85\n80\n0\n1.5\n95\n0\n30'
+    INPUT=$'\n\n\n\ny\n101\n85\n80\n0\n1.5\n95\n0\n30\n11\n3'
     run_script install
     assert_rc 0
     assert_contains "$ERR" "Expected a whole number from 1 to 100."
     assert_contains "$ERR" "Expected a positive number, e.g. 2 or 1.5."
     assert_contains "$ERR" "Expected a whole number of days from 1 to 365."
+    assert_contains "$ERR" "Expected a whole number from 1 to 10."
     local conf="$ROOT_DIR/etc/hc-monitor.conf"
     assert_contains "$conf" 'DISK_MAX_PCT="85"'
     assert_contains "$conf" 'MEM_MAX_PCT="80"'
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="1.5"'
     assert_contains "$conf" 'CPU_MAX_PCT="95"'
     assert_contains "$conf" 'CERT_MIN_DAYS="30"'
+    assert_contains "$conf" 'CONFIRM_RUNS="3"'
 }
 
 test_reinstall_keeps_current_values() {
     local cert
     cert="localhost:$(tls_port good)"
     write_conf 'HC_PING_URL="http://127.0.0.1:1/keep"' 'SERVICES="cron"' 'PORTS="22"' "CERTS=\"$cert\"" \
-        'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' 'LOAD_MAX_PER_CPU="3"' 'CPU_MAX_PCT="80"' 'CERT_MIN_DAYS="21"'
+        'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' 'LOAD_MAX_PER_CPU="3"' 'CPU_MAX_PCT="80"' 'CERT_MIN_DAYS="21"' \
+        'CONFIRM_RUNS="4"'
     printf 'cron active\n' > "$STUB_DIR/services"
     INPUT=$'\n\n\n\n'
     run_script install
@@ -102,11 +106,14 @@ test_reinstall_keeps_current_values() {
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="3"'
     assert_contains "$conf" 'CPU_MAX_PCT="80"'
     assert_contains "$conf" 'CERT_MIN_DAYS="21"'
+    assert_contains "$conf" 'CONFIRM_RUNS="4"'
 }
 
 test_upgrade_from_config_without_new_keys() {
-    # A config written before PORTS, CERTS, CPU_MAX_PCT and CERT_MIN_DAYS existed.
-    write_conf 'HC_PING_URL="http://127.0.0.1:1/old"' 'SERVICES=""' 'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"'
+    # A config written before PORTS, CERTS, CPU_MAX_PCT, CERT_MIN_DAYS and CONFIRM_RUNS existed
+    # (written directly: write_conf would add CONFIRM_RUNS).
+    printf '%s\n' 'HC_PING_URL="http://127.0.0.1:1/old"' 'SERVICES=""' 'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' \
+        > "$ROOT_DIR/etc/hc-monitor.conf"
     INPUT=$'\n\n\n\n'
     run_script install
     assert_rc 0
@@ -115,6 +122,7 @@ test_upgrade_from_config_without_new_keys() {
     assert_contains "$conf" 'CERTS=""'
     assert_contains "$conf" 'CPU_MAX_PCT="90"'
     assert_contains "$conf" 'CERT_MIN_DAYS="14"'
+    assert_contains "$conf" 'CONFIRM_RUNS="2"'
     assert_contains "$conf" 'DISK_MAX_PCT="70"'
 }
 
@@ -219,13 +227,14 @@ test_uninstall_yes_removes_everything() {
     assert_rc 0
     add_restarts_state . nginx 1
     set_oom_state 0 0
+    add_confirm_state . "Disk /" 1
     : > "$CALLS"
     INPUT=$'y\n'
     run_script uninstall
     assert_rc 0
     local f
     for f in etc/hc-monitor.conf usr/local/bin/hc-monitor.sh var/lib/hc-monitor/cpu.stat \
-        var/lib/hc-monitor/restarts.state var/lib/hc-monitor/oom.state \
+        var/lib/hc-monitor/restarts.state var/lib/hc-monitor/oom.state var/lib/hc-monitor/confirm.state \
         etc/systemd/system/hc-monitor.service etc/systemd/system/hc-monitor.timer; do
         [[ ! -e $ROOT_DIR/$f ]] || fail "/$f was not removed"
     done
