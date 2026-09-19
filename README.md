@@ -49,7 +49,7 @@ A service can also get a file of its own with its units, ports and HTTP health e
    - the systemd services to watch, space-separated (for example `nginx postgresql`) — names that don't exist are rejected;
    - the local ports to watch, space-separated (for example `22 443 53/udp`; a bare number means TCP);
    - the TLS certificates to watch, space-separated (for example `gw.example.com gw.example.com:9001`; a bare host name means port 443);
-   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days, confirm a problem after 2 runs); `0` turns the disk, RAM, load or CPU check off.
+   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days, confirm a problem after 2 runs); `0` turns the disk, RAM, load or CPU check off, and the certificate threshold is asked only when there are certificates to watch.
 
    For the lists, Enter keeps the current list (none on a fresh install) and `-` clears it.
 
