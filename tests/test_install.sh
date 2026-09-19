@@ -100,9 +100,14 @@ test_install_reprompts_bad_url_and_unknown_service() {
 }
 
 test_install_changes_thresholds() {
+    local cert
+    cert="localhost:$(tls_port good)"
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" "CERTS=\"$cert\""
     INPUT=$'\n\n\n\n\ny\n101\n85\n80\n-1\n1.5\n95\n0\n30\n11\n3'
     run_script install
     assert_rc 0
+    grep -qE '^  Certificate expires within: +14 days$' "$ERR" || fail "no certificate threshold line: $(cat "$ERR")"
+    assert_contains "$ERR" "Certificates: an alert when a watched certificate expires within this many days."
     assert_contains "$ERR" "Expected a whole number from 0 to 100 (0 turns the check off)."
     assert_contains "$ERR" "Expected a number, e.g. 2 or 1.5 (0 turns the check off)."
     assert_contains "$ERR" "The threshold is per CPU core: 2 means an alert at load 8 on this server."
@@ -115,6 +120,19 @@ test_install_changes_thresholds() {
     assert_contains "$conf" 'CPU_MAX_PCT="95"'
     assert_contains "$conf" 'CERT_MIN_DAYS="30"'
     assert_contains "$conf" 'CONFIRM_RUNS="3"'
+}
+
+test_install_skips_certificate_threshold_without_certificates() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'CERT_MIN_DAYS="21"'
+    INPUT=$'\n\n\n\n\ny\n\n\n\n\n3'   # no certificates: the number of runs comes right after CPU
+    run_script install
+    assert_rc 0
+    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    assert_contains "$conf" 'CERTS=""'
+    assert_contains "$conf" 'CERT_MIN_DAYS="21"'
+    assert_contains "$conf" 'CONFIRM_RUNS="3"'
+    assert_not_contains "$ERR" "Certificate expires within"
+    assert_not_contains "$ERR" "Certificates: an alert when"
 }
 
 test_install_turns_checks_off() {

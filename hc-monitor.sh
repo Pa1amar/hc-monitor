@@ -1175,6 +1175,7 @@ load_text() {
 
 ask_settings() {
     local cpus
+    local -a rows
     cpus=$(nproc 2> /dev/null)
     [[ $cpus =~ ^[1-9][0-9]*$ ]] || cpus=""
     explain "healthchecks.io ping URL, like https://hc-ping.com/<uuid>." \
@@ -1193,14 +1194,17 @@ ask_settings() {
     PORTS="$ANSWER"
     ask_certs "$CERTS"
     CERTS="$ANSWER"
+    # Label and value pairs; the certificate threshold only matters with certificates to watch.
+    rows=(
+        "Disk space or inodes used:" "$(threshold_text "$DISK_MAX_PCT" %)"
+        "RAM used:" "$(threshold_text "$MEM_MAX_PCT" %)"
+        "Load average per CPU core:" "$(load_text "$cpus")"
+        "CPU busy:" "$(threshold_text "$CPU_MAX_PCT" %)"
+    )
+    [[ -z $CERTS ]] || rows+=("Certificate expires within:" "$CERT_MIN_DAYS days")
+    rows+=("A problem alerts after:" "$(runs_text "$CONFIRM_RUNS")")
     explain "Alert thresholds:"
-    printf '  %-28s %s\n' \
-        "Disk space or inodes used:" "$(threshold_text "$DISK_MAX_PCT" %)" \
-        "RAM used:" "$(threshold_text "$MEM_MAX_PCT" %)" \
-        "Load average per CPU core:" "$(load_text "$cpus")" \
-        "CPU busy:" "$(threshold_text "$CPU_MAX_PCT" %)" \
-        "Certificate expires within:" "$CERT_MIN_DAYS days" \
-        "A problem alerts after:" "$(runs_text "$CONFIRM_RUNS")" >&2
+    printf '  %-28s %s\n' "${rows[@]}" >&2
     if confirm "Change the thresholds? [y/N] " n; then
         explain "Disk: an alert when a local filesystem has this share of its space or inodes (the limit" \
             "on the number of files) used."
@@ -1223,10 +1227,12 @@ ask_settings() {
         ask_valid "CPU threshold, % (0 = off)" "$CPU_MAX_PCT" valid_pct \
             "Expected a whole number from 0 to 100 (0 turns the check off)."
         CPU_MAX_PCT="$ANSWER"
-        explain "Certificates: an alert when a watched certificate expires within this many days."
-        ask_valid "Days before expiry" "$CERT_MIN_DAYS" valid_days \
-            "Expected a whole number of days from 1 to 365."
-        CERT_MIN_DAYS="$ANSWER"
+        if [[ -n $CERTS ]]; then
+            explain "Certificates: an alert when a watched certificate expires within this many days."
+            ask_valid "Days before expiry" "$CERT_MIN_DAYS" valid_days \
+                "Expected a whole number of days from 1 to 365."
+            CERT_MIN_DAYS="$ANSWER"
+        fi
         explain "Confirmation: a problem alerts only once it's seen this many runs in a row, so a one-off" \
             "spike doesn't. 1 alerts at once. Service restarts and OOM kills always alert at once."
         ask_valid "Runs in a row (1 = at once)" "$CONFIRM_RUNS" valid_runs \
