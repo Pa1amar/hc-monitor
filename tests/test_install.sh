@@ -26,6 +26,10 @@ test_install_fresh() {
     assert_contains "$conf" 'CPU_MAX_PCT="90"'
     assert_contains "$conf" 'CERT_MIN_DAYS="14"'
     assert_contains "$conf" 'CONFIRM_RUNS="2"'
+    grep -qE '^  Disk space or inodes used: +90%$' "$ERR" || fail "no disk threshold line: $(cat "$ERR")"
+    grep -qE '^  Load average per CPU core: +2 \(load 8 on this server\)$' "$ERR" ||
+        fail "no load threshold line: $(cat "$ERR")"
+    grep -qE '^  A problem alerts after: +2 runs in a row$' "$ERR" || fail "no confirmation line: $(cat "$ERR")"
     assert_contains "$OUT" "TLS $cert: valid until"
     assert_mode "$ROOT_DIR/usr/local/bin/hc-monitor.sh" 700
     cmp -s "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh" || fail "the installed copy differs from the original"
@@ -96,11 +100,12 @@ test_install_reprompts_bad_url_and_unknown_service() {
 }
 
 test_install_changes_thresholds() {
-    INPUT=$'\n\n\n\n\ny\n101\n85\n80\n0\n1.5\n95\n0\n30\n11\n3'
+    INPUT=$'\n\n\n\n\ny\n101\n85\n80\n-1\n1.5\n95\n0\n30\n11\n3'
     run_script install
     assert_rc 0
-    assert_contains "$ERR" "Expected a whole number from 1 to 100."
-    assert_contains "$ERR" "Expected a positive number, e.g. 2 or 1.5."
+    assert_contains "$ERR" "Expected a whole number from 0 to 100 (0 turns the check off)."
+    assert_contains "$ERR" "Expected a number, e.g. 2 or 1.5 (0 turns the check off)."
+    assert_contains "$ERR" "The threshold is per CPU core: 2 means an alert at load 8 on this server."
     assert_contains "$ERR" "Expected a whole number of days from 1 to 365."
     assert_contains "$ERR" "Expected a whole number from 1 to 10."
     local conf="$ROOT_DIR/etc/hc-monitor.conf"
@@ -110,6 +115,36 @@ test_install_changes_thresholds() {
     assert_contains "$conf" 'CPU_MAX_PCT="95"'
     assert_contains "$conf" 'CERT_MIN_DAYS="30"'
     assert_contains "$conf" 'CONFIRM_RUNS="3"'
+}
+
+test_install_turns_checks_off() {
+    INPUT=$'\n\n\n\n\ny\n0\n0\n0\n0\n\n'   # thresholds: disk, RAM, load and CPU 0; the rest: Enter
+    run_script install
+    assert_rc 0
+    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    assert_contains "$conf" '# 0 turns the disk, RAM, load or CPU check off.'
+    assert_contains "$conf" 'DISK_MAX_PCT="0"'
+    assert_contains "$conf" 'MEM_MAX_PCT="0"'
+    assert_contains "$conf" 'LOAD_MAX_PER_CPU="0"'
+    assert_contains "$conf" 'CPU_MAX_PCT="0"'
+    assert_contains "$conf" 'CERT_MIN_DAYS="14"'
+    assert_contains "$OUT" "The report will look like this:"
+    assert_not_contains "$OUT" "Disk /"
+    assert_not_contains "$OUT" "RAM:"
+    assert_not_contains "$OUT" "Load"
+    assert_not_contains "$OUT" "CPU:"
+    INPUT=$'\n\n\n\n\n'   # reinstall: Enter keeps the checks off
+    run_script install
+    assert_rc 0
+    local label
+    for label in "Disk space or inodes used" "RAM used" "Load average per CPU core" "CPU busy"; do
+        grep -qE "^  $label: +off\$" "$ERR" || fail "$label is not shown as off: $(cat "$ERR")"
+    done
+    grep -qE '^  A problem alerts after: +1 run \(at once\)$' "$ERR" || fail "no confirmation line: $(cat "$ERR")"
+    assert_contains "$conf" 'DISK_MAX_PCT="0"'
+    assert_contains "$conf" 'MEM_MAX_PCT="0"'
+    assert_contains "$conf" 'LOAD_MAX_PER_CPU="0"'
+    assert_contains "$conf" 'CPU_MAX_PCT="0"'
 }
 
 test_reinstall_keeps_current_values() {

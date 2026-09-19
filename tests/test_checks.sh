@@ -116,6 +116,40 @@ test_unreadable_load_is_a_problem() {
     assert_contains "$OUT" "- Load: cannot determine"
 }
 
+test_zero_thresholds_turn_checks_off() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'DISK_MAX_PCT="0"' 'MEM_MAX_PCT="0"' \
+        'LOAD_MAX_PER_CPU="0.0"' 'CPU_MAX_PCT="0"'
+    set_df ' 95%   95% ext4     /'
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 50000 kB\n' > "$ROOT_DIR/proc/meminfo"
+    echo "9.00 9.50 9.10 3/200 999" > "$ROOT_DIR/proc/loadavg"
+    set_cpu_state 300 8600 7950 100 0   # 95% busy since then
+    local sample
+    sample=$(< "$ROOT_DIR/var/lib/hc-monitor/cpu.stat")
+    run_script
+    assert_rc 0
+    assert_requests "POST /test-uuid"
+    assert_contains "$BODY" "All good"
+    assert_not_contains "$BODY" "Disk"
+    assert_not_contains "$BODY" "RAM"
+    assert_not_contains "$BODY" "Load"
+    assert_not_contains "$BODY" "CPU"
+    assert_not_contains "$CALLS" "df "
+    [[ $(< "$ROOT_DIR/var/lib/hc-monitor/cpu.stat") == "$sample" ]] || fail "cpu.stat changed while the check is off"
+}
+
+test_check_off_keeps_the_others() {
+    write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" 'MEM_MAX_PCT="0"' 'CPU_MAX_PCT="0"'
+    set_df ' 95%   12% ext4     /'
+    printf 'MemTotal: 1000000 kB\nMemAvailable: 50000 kB\n' > "$ROOT_DIR/proc/meminfo"
+    set_cpu_state 300 8600 7950 100 0
+    run_script --dry-run
+    assert_contains "$OUT" "PROBLEMS (1):"
+    assert_contains "$OUT" "- Disk /: 95% used (threshold 90%)"
+    assert_contains "$OUT" "Load (1/5/15 min): 0.10 0.20 0.30, CPUs: 4"
+    assert_not_contains "$OUT" "RAM"
+    assert_not_contains "$OUT" "CPU:"
+}
+
 test_service_states() {
     write_conf "HC_PING_URL=\"http://127.0.0.1:$SERVER_PORT/test-uuid\"" \
         'SERVICES="nginx cron postgresql ngnix"'

@@ -144,11 +144,21 @@ valid_url() {
 }
 
 valid_pct() {
-    [[ $1 =~ ^([1-9][0-9]?|100)$ ]]
+    [[ $1 =~ ^(0|[1-9][0-9]?|100)$ ]]
 }
 
 valid_load() {
-    [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v x="$1" 'BEGIN { exit !(x + 0 > 0) }'
+    [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+
+# is_off <threshold>: a disk, RAM, load or CPU threshold of 0 turns that check off.
+is_off() {
+    [[ $1 =~ ^0+(\.0+)?$ ]]
+}
+
+# threshold_text <threshold> <unit>: "off" for 0, otherwise the threshold with its unit.
+threshold_text() {
+    if is_off "$1"; then echo off; else echo "$1$2"; fi
 }
 
 valid_service() {
@@ -331,6 +341,11 @@ oom_victims() {
         END { printf "%s", list }'
 }
 
+# load_limit <CPU cores>: the load average that raises an alert, LOAD_MAX_PER_CPU per core.
+load_limit() {
+    awk -v c="$1" -v k="$LOAD_MAX_PER_CPU" 'BEGIN { printf "%g", c * k }'
+}
+
 check_load() {
     local l1="" l5="" l15="" cpus limit
     if [[ -r $LOADAVG ]]; then
@@ -341,7 +356,7 @@ check_load() {
         problem "Load: cannot determine"
         return
     fi
-    limit=$(awk -v c="$cpus" -v k="$LOAD_MAX_PER_CPU" 'BEGIN { printf "%g", c * k }')
+    limit=$(load_limit "$cpus")
     summary "Load (1/5/15 min): $l1 $l5 $l15, CPUs: $cpus"
     if awk -v l="$l15" -v m="$limit" 'BEGIN { exit !(l + 0 >= m + 0) }'; then
         problem "Load: load15 $l15 on $cpus CPUs (threshold $limit)"
@@ -697,11 +712,11 @@ run_checks() {
     PROBLEMS=()
     EVENTS=()
     SUMMARY=()
-    check_disk
-    check_memory
+    is_off "$DISK_MAX_PCT" || check_disk
+    is_off "$MEM_MAX_PCT" || check_memory
     check_oom
-    check_load
-    check_cpu
+    is_off "$LOAD_MAX_PER_CPU" || check_load
+    is_off "$CPU_MAX_PCT" || check_cpu
     check_services
     check_ports
     check_certs
@@ -1116,37 +1131,105 @@ check_cert_entry() {
     return 1
 }
 
+# explain <line>...: a blank line, then the lines that explain the next question (on stderr, with
+# the prompts).
+explain() {
+    echo >&2
+    printf '%s\n' "$@" >&2
+}
+
+# ask_services, ask_ports, ask_certs <current list>: the lists that install and add ask for; the
+# accepted list is left in ANSWER.
+ask_services() {
+    explain "Systemd services: an alert when one stops running or systemd restarts it after a crash." \
+        "Space-separated, e.g. nginx postgresql."
+    ask_list "Services to watch" "$1" check_service_entry
+}
+
+ask_ports() {
+    explain "Local ports: an alert when nothing listens on one." \
+        "Space-separated; 443 or 443/tcp means TCP, 53/udp means UDP, e.g. 22 443 53/udp."
+    ask_list "Ports to watch" "$1" check_port_entry
+}
+
+ask_certs() {
+    explain "TLS certificates: an alert when one expires soon, has expired, doesn't match its host name" \
+        "or isn't trusted." \
+        "Space-separated host names, with :port if it isn't 443, e.g. example.com example.com:9001."
+    ask_list "Certificates to watch" "$1" check_cert_entry
+}
+
+# runs_text <n>: "1 run (at once)" or "<n> runs in a row".
+runs_text() {
+    if (( $1 == 1 )); then echo "1 run (at once)"; else echo "$1 runs in a row"; fi
+}
+
+# load_text <CPU cores, or empty>: the load threshold and the load average it means on this server.
+load_text() {
+    if is_off "$LOAD_MAX_PER_CPU"; then
+        echo off
+    else
+        echo "$LOAD_MAX_PER_CPU${1:+ (load $(load_limit "$1") on this server)}"
+    fi
+}
+
 ask_settings() {
-    echo "One ping URL per server: create a separate healthchecks.io check for each server." >&2
-    ask_valid "healthchecks.io ping URL" "$HC_PING_URL" valid_url \
+    local cpus
+    cpus=$(nproc 2> /dev/null)
+    [[ $cpus =~ ^[1-9][0-9]*$ ]] || cpus=""
+    explain "healthchecks.io ping URL, like https://hc-ping.com/<uuid>." \
+        "Use one check per server: if two servers ping the same check, a live server hides a dead one."
+    ask_valid "Ping URL" "$HC_PING_URL" valid_url \
         "Expected a URL like https://hc-ping.com/<uuid> without spaces, quotes, \$, \` or \\."
     HC_PING_URL="$ANSWER"
     trim_slashes HC_PING_URL
-    ask_valid "How often to check, in minutes: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60" "$INTERVAL" \
-        valid_interval "Expected one of 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60."
+    explain "How often to check: every 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60 minutes."
+    ask_valid "Minutes between checks" "$INTERVAL" valid_interval \
+        "Expected one of 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60."
     INTERVAL="$ANSWER"
-    ask_list "Systemd services to watch, space-separated" "$SERVICES" check_service_entry
+    ask_services "$SERVICES"
     SERVICES="$ANSWER"
-    ask_list "Local ports to watch, space-separated: 443 or 443/tcp for TCP, 53/udp for UDP" \
-        "$PORTS" check_port_entry
+    ask_ports "$PORTS"
     PORTS="$ANSWER"
-    ask_list "TLS certificates to watch, space-separated: host or host:port (443 by default)" \
-        "$CERTS" check_cert_entry
+    ask_certs "$CERTS"
     CERTS="$ANSWER"
-    if confirm "Thresholds: disk $DISK_MAX_PCT%, RAM $MEM_MAX_PCT%, load $LOAD_MAX_PER_CPU per CPU, CPU busy $CPU_MAX_PCT%, certificates $CERT_MIN_DAYS days, confirm after $CONFIRM_RUNS runs. Change them? [y/N] " n; then
-        ask_valid "Disk and inode threshold, %" "$DISK_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
+    explain "Alert thresholds:"
+    printf '  %-28s %s\n' \
+        "Disk space or inodes used:" "$(threshold_text "$DISK_MAX_PCT" %)" \
+        "RAM used:" "$(threshold_text "$MEM_MAX_PCT" %)" \
+        "Load average per CPU core:" "$(load_text "$cpus")" \
+        "CPU busy:" "$(threshold_text "$CPU_MAX_PCT" %)" \
+        "Certificate expires within:" "$CERT_MIN_DAYS days" \
+        "A problem alerts after:" "$(runs_text "$CONFIRM_RUNS")" >&2
+    if confirm "Change the thresholds? [y/N] " n; then
+        explain "Disk: an alert when a local filesystem has this share of its space or inodes (the limit" \
+            "on the number of files) used."
+        ask_valid "Disk threshold, % (0 = off)" "$DISK_MAX_PCT" valid_pct \
+            "Expected a whole number from 0 to 100 (0 turns the check off)."
         DISK_MAX_PCT="$ANSWER"
-        ask_valid "RAM threshold, %" "$MEM_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
+        explain "RAM: an alert when this share of memory is in use. Disk cache doesn't count: the kernel" \
+            "frees it when programs need memory. OOM kills are reported even with this check off."
+        ask_valid "RAM threshold, % (0 = off)" "$MEM_MAX_PCT" valid_pct \
+            "Expected a whole number from 0 to 100 (0 turns the check off)."
         MEM_MAX_PCT="$ANSWER"
-        ask_valid "Load threshold per CPU" "$LOAD_MAX_PER_CPU" valid_load \
-            "Expected a positive number, e.g. 2 or 1.5."
+        explain "Load average: the number of processes running or waiting for the CPU or the disk," \
+            "averaged over 15 minutes. Unlike CPU busy, it also grows when processes hang on a slow disk" \
+            "or network storage. The threshold is per CPU core${cpus:+: 2 means an alert at load $(( 2 * cpus )) on this server}."
+        ask_valid "Load threshold per CPU core (0 = off)" "$LOAD_MAX_PER_CPU" valid_load \
+            "Expected a number, e.g. 2 or 1.5 (0 turns the check off)."
         LOAD_MAX_PER_CPU="$ANSWER"
-        ask_valid "CPU busy threshold, %" "$CPU_MAX_PCT" valid_pct "Expected a whole number from 1 to 100."
+        explain "CPU busy: the share of time the CPU was working, averaged since the previous run;" \
+            "time spent waiting for the disk doesn't count."
+        ask_valid "CPU threshold, % (0 = off)" "$CPU_MAX_PCT" valid_pct \
+            "Expected a whole number from 0 to 100 (0 turns the check off)."
         CPU_MAX_PCT="$ANSWER"
-        ask_valid "Certificate expiry warning, days" "$CERT_MIN_DAYS" valid_days \
+        explain "Certificates: an alert when a watched certificate expires within this many days."
+        ask_valid "Days before expiry" "$CERT_MIN_DAYS" valid_days \
             "Expected a whole number of days from 1 to 365."
         CERT_MIN_DAYS="$ANSWER"
-        ask_valid "Confirm a problem after this many runs in a row (1 = at once)" "$CONFIRM_RUNS" valid_runs \
+        explain "Confirmation: a problem alerts only once it's seen this many runs in a row, so a one-off" \
+            "spike doesn't. 1 alerts at once. Service restarts and OOM kills always alert at once."
+        ask_valid "Runs in a row (1 = at once)" "$CONFIRM_RUNS" valid_runs \
             "Expected a whole number from 1 to 10."
         CONFIRM_RUNS="$ANSWER"
     fi
@@ -1163,6 +1246,7 @@ INTERVAL="$INTERVAL"
 SERVICES="$SERVICES"
 PORTS="$PORTS"
 CERTS="$CERTS"
+# 0 turns the disk, RAM, load or CPU check off.
 DISK_MAX_PCT="$DISK_MAX_PCT"
 MEM_MAX_PCT="$MEM_MAX_PCT"
 LOAD_MAX_PER_CPU="$LOAD_MAX_PER_CPU"
@@ -1400,25 +1484,29 @@ cmd_add() {
         (( loaded )) || die 1 "service $name: ${error:-cannot load ${SERVICES_DIR#"$ROOT"}/$name/.env}"
     fi
     echo "Service $name: ${SERVICES_DIR#"$ROOT"}/$name/.env" >&2
-    ask_optional "Ping URL of a separate healthchecks.io check for this service" "$url" valid_service_url \
+    explain "Own check: the ping URL of a separate healthchecks.io check, so the service's alerts aren't lost" \
+        "while the server's check is already down. Without it (-), the service reports with the server."
+    ask_optional "Ping URL of the service's check" "$url" valid_service_url \
         "Expected a URL like https://hc-ping.com/<uuid> of a separate check (not the server's), without spaces, quotes, \$, \` or \\."
     url=$ANSWER
     trim_slashes url
     while true; do
-        ask_list "Systemd services to watch, space-separated" "$services" check_service_entry
+        ask_services "$services"
         services=$ANSWER
-        ask_list "Local ports to watch, space-separated: 443 or 443/tcp for TCP, 53/udp for UDP" \
-            "$ports" check_port_entry
+        ask_ports "$ports"
         ports=$ANSWER
-        ask_list "TLS certificates to watch, space-separated: host or host:port (443 by default)" \
-            "$certs" check_cert_entry
+        ask_certs "$certs"
         certs=$ANSWER
+        explain "Health check URL: an alert when it doesn't answer with a 2xx status within $HTTP_TIMEOUT seconds," \
+            "e.g. http://localhost:8080/health."
         ask_optional "Health check URL" "$http_url" valid_url \
             "Expected a URL like http://localhost:8080/health without spaces, quotes, \$, \` or \\."
         http_url=$ANSWER
         http_expect=${http_url:+$http_expect}
         if [[ -n $http_url ]]; then
-            ask_optional "Text the response must contain, as a regular expression" "$http_expect" valid_regex \
+            explain "Expected text: an alert when the response doesn't match this regular expression," \
+                "e.g. \"status\" *: *\"up\". Without it (-), any 2xx response is fine."
+            ask_optional "Expected text" "$http_expect" valid_regex \
                 "Expected a single-line regular expression, e.g. \"status\" *: *\"up\"."
             http_expect=$ANSWER
         fi

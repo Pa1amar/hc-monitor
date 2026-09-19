@@ -49,7 +49,7 @@ A service can also get a file of its own with its units, ports and HTTP health e
    - the systemd services to watch, space-separated (for example `nginx postgresql`) — names that don't exist are rejected;
    - the local ports to watch, space-separated (for example `22 443 53/udp`; a bare number means TCP);
    - the TLS certificates to watch, space-separated (for example `gw.example.com gw.example.com:9001`; a bare host name means port 443);
-   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days, confirm a problem after 2 runs).
+   - whether to change the thresholds (defaults: disk 90%, RAM 90%, load 2 per CPU core, CPU busy 90%, certificates 14 days, confirm a problem after 2 runs); `0` turns the disk, RAM, load or CPU check off.
 
    For the lists, Enter keeps the current list (none on a fresh install) and `-` clears it.
 
@@ -76,6 +76,8 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 | TLS certificates | a listed certificate expires in fewer than `CERT_MIN_DAYS` days, has expired, doesn't match the host name or isn't trusted | checked with `openssl s_client` the way clients see it (system CA store); `gw.example.com` means port 443 |
 
 A check that can't run — for example `df` hanging for more than 10 seconds — is reported as a problem too, never skipped silently.
+
+To turn the disk, RAM, load or CPU check off, set its threshold to `0` (`DISK_MAX_PCT`, `MEM_MAX_PCT`, `LOAD_MAX_PER_CPU` or `CPU_MAX_PCT`): the check doesn't run and its line disappears from the report. OOM kills are still reported with the RAM check off.
 
 A problem is reported only once it has lasted `CONFIRM_RUNS` runs in a row (2 by default, so one interval later), so a one-off hiccup doesn't raise an alarm. Until then the report lists it under `Pending` and the check stays up:
 
@@ -200,6 +202,7 @@ INTERVAL="5"
 SERVICES="nginx postgresql"
 PORTS="22 443 53/udp"
 CERTS="web-1.example.com"
+# 0 turns the disk, RAM, load or CPU check off.
 DISK_MAX_PCT="90"
 MEM_MAX_PCT="90"
 LOAD_MAX_PER_CPU="2"
