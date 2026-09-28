@@ -67,7 +67,7 @@ If you edit the script on Windows, keep LF line endings — with CRLF, bash fail
 |---|---|---|
 | Disk space and inodes | usage ≥ `DISK_MAX_PCT` on any local filesystem | `tmpfs`, `devtmpfs`, `squashfs` (snaps), `overlay` (Docker) and `iso9660` are skipped |
 | Memory | used ≥ `MEM_MAX_PCT` | based on `MemAvailable`, so page cache doesn't count as used |
-| OOM kills | the kernel's OOM killer killed a process since the previous run | counted by `oom_kill` in `/proc/vmstat`; process names come from the kernel log |
+| OOM kills | the OOM killer killed a process since the previous run | counted by `oom_kill` in `/proc/vmstat`; in a container (LXC, Docker) `/proc/vmstat` is the host's, so the container's own memory cgroup is read instead; process names come from the kernel log, which a container usually can't read |
 | CPU load | 15-minute load average ≥ CPU cores × `LOAD_MAX_PER_CPU` | the long window ignores short spikes |
 | CPU usage | busy ≥ `CPU_MAX_PCT`, averaged since the previous run | busy = 100% − idle − iowait; steal (time taken by the hypervisor) counts as busy and is shown separately |
 | Services | a listed unit is not `active` or `reloading` | a unit that doesn't exist is reported separately, so a typo doesn't look like a crash |

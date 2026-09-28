@@ -45,6 +45,7 @@ readonly RESTARTS_STATE="$STATE_DIR/restarts.state"
 readonly OOM_STATE="$STATE_DIR/oom.state"
 readonly CONFIRM_STATE="$STATE_DIR/confirm.state"
 readonly VMSTAT="$ROOT/proc/vmstat"
+readonly CGROUP_DIR="$ROOT/sys/fs/cgroup"
 
 # Service files live in root's home: the timer runs as root, and systemd doesn't set $HOME.
 root_home=$(getent passwd 0 2> /dev/null)
@@ -303,25 +304,42 @@ check_memory() {
     fi
 }
 
-# check_oom: processes the kernel's OOM killer killed since the previous run (the oom_kill
-# counter in /proc/vmstat), named from the kernel log when possible; leaves this run's count in
-# OOM_SAMPLE for save_state.
+# check_oom: processes the OOM killer killed since the previous run, counted by oom_kill in
+# /proc/vmstat and named from the kernel log when possible; leaves this run's count in OOM_SAMPLE
+# for save_state.
 check_oom() {
-    local count saved="" now n names word=processes
+    local file=$VMSTAT source=vmstat count saved="" now n names word=processes
+    local saved_re='^([0-9]+) ([0-9]+)( (vmstat|cgroup))?$' s_time s_count s_source
     OOM_SAMPLE=""
-    count=$(awk '$1 == "oom_kill" { print $2; exit }' "$VMSTAT" 2> /dev/null)
+    # In a container /proc/vmstat is the host's and counts the kills in every container, so the
+    # container's own memory cgroup is read instead: memory.events with cgroup v2 (it exists only
+    # below the root cgroup, so only inside a container), memory.oom_control with cgroup v1.
+    if [[ -e $CGROUP_DIR/memory.events ]]; then
+        file=$CGROUP_DIR/memory.events source=cgroup
+    elif systemd-detect-virt --container > /dev/null 2>&1; then
+        file=$CGROUP_DIR/memory/memory.oom_control source=cgroup
+    fi
+    count=$(awk '$1 == "oom_kill" { print $2; exit }' "$file" 2> /dev/null)
     if [[ ! $count =~ ^[0-9]+$ ]]; then
-        problem "OOM: cannot determine (no oom_kill in /proc/vmstat)"
+        if [[ $source == cgroup ]]; then
+            problem "OOM: cannot determine (no oom_kill in the container's memory cgroup)"
+        else
+            problem "OOM: cannot determine (no oom_kill in /proc/vmstat)"
+        fi
         return
     fi
     printf -v now '%(%s)T' -1
-    OOM_SAMPLE="$now $count"
+    OOM_SAMPLE="$now $count $source"
     { read -r saved < "$OOM_STATE"; } 2> /dev/null
-    [[ $saved =~ ^[0-9]+\ [0-9]+$ ]] || return 0   # the first run only records a baseline
-    (( count > ${saved#* } )) || return 0            # no kills, or the counter restarted at boot
-    n=$(( count - ${saved#* } ))
+    # The first run, and the first one that reads a different counter, only record a baseline;
+    # a state saved without its source was read from /proc/vmstat.
+    [[ $saved =~ $saved_re ]] || return 0
+    s_time=${BASH_REMATCH[1]} s_count=${BASH_REMATCH[2]} s_source=${BASH_REMATCH[4]:-vmstat}
+    [[ $s_source == "$source" ]] || return 0
+    (( count > s_count )) || return 0   # no kills, or the counter restarted at boot
+    n=$(( count - s_count ))
     (( n == 1 )) && word=process
-    names=$(oom_victims "${saved% *}")
+    names=$(oom_victims "$s_time")
     event "OOM killer: killed $n $word since the last check${names:+: $names}"
 }
 
