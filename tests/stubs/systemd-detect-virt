@@ -1,0 +1,6 @@
+#!/bin/bash
+# systemd-detect-virt stub: the virtualization from $STUB_DIR/virt ("none" by default); exits 1
+# when there is none, like the real command.
+virt=$(cat "$STUB_DIR/virt" 2> /dev/null || echo none)
+echo "$virt"
+[[ $virt != none ]]

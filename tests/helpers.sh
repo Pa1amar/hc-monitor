@@ -164,12 +164,26 @@ set_oom_kills() {
     printf 'nr_free_pages 12345\noom_kill %s\npgfault 999\n' "$1" > "$ROOT_DIR/proc/vmstat"
 }
 
-# set_oom_state <seconds ago> <count> — the OOM kill count saved by the previous run.
+# set_oom_state <seconds ago> <count> [vmstat|cgroup] — the OOM kill count saved by the previous
+# run and where it was read; without a source, a state file from before the source was saved.
 set_oom_state() {
     local now
     printf -v now '%(%s)T' -1
     mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
-    echo "$((now - $1)) $2" > "$ROOT_DIR/var/lib/hc-monitor/oom.state"
+    echo "$((now - $1)) $2${3:+ $3}" > "$ROOT_DIR/var/lib/hc-monitor/oom.state"
+}
+
+# set_cgroup_oom_kills <n> — memory.events of the container's own cgroup (cgroup v2), as a
+# container sees it at /sys/fs/cgroup.
+set_cgroup_oom_kills() {
+    mkdir -p "$ROOT_DIR/sys/fs/cgroup"
+    printf 'low 0
+high 0
+max 0
+oom %s
+oom_kill %s
+oom_group_kill 0
+' "$1" "$1"         > "$ROOT_DIR/sys/fs/cgroup/memory.events"
 }
 
 # add_restarts_state <context> <unit> <count> — a restart count saved by the previous run
