@@ -39,7 +39,7 @@ test_empty_url_exits_2() {
 }
 
 test_missing_config_exits_2() {
-    rm "$ROOT_DIR/etc/hc-monitor.conf"
+    rm "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     run_script
     assert_rc 2
     assert_contains "$ERR" "HC_PING_URL is not set, run install"
@@ -56,7 +56,7 @@ test_invalid_threshold_in_config_exits_2() {
 
 test_unreadable_config_exits_2() {
     (( EUID == 0 )) && return 0   # root can read any file, so this case can't be reproduced
-    chmod 000 "$ROOT_DIR/etc/hc-monitor.conf"
+    chmod 000 "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     run_script
     assert_rc 2
     assert_contains "$ERR" "cannot read"

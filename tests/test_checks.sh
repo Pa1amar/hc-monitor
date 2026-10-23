@@ -124,7 +124,7 @@ test_zero_thresholds_turn_checks_off() {
     echo "9.00 9.50 9.10 3/200 999" > "$ROOT_DIR/proc/loadavg"
     set_cpu_state 300 8600 7950 100 0   # 95% busy since then
     local sample
-    sample=$(< "$ROOT_DIR/var/lib/hc-monitor/cpu.stat")
+    sample=$(< "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat")
     run_script
     assert_rc 0
     assert_requests "POST /test-uuid"
@@ -134,7 +134,7 @@ test_zero_thresholds_turn_checks_off() {
     assert_not_contains "$BODY" "Load"
     assert_not_contains "$BODY" "CPU"
     assert_not_contains "$CALLS" "df "
-    [[ $(< "$ROOT_DIR/var/lib/hc-monitor/cpu.stat") == "$sample" ]] || fail "cpu.stat changed while the check is off"
+    [[ $(< "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat") == "$sample" ]] || fail "cpu.stat changed while the check is off"
 }
 
 test_check_off_keeps_the_others() {
@@ -287,7 +287,7 @@ test_cpu_short_interval_in_seconds() {
 }
 
 test_cpu_without_previous_sample_measures_one_second() {
-    rm "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
+    rm "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat"
     use_sleep_stub 1050 0 550 8100 100 0 0 0
     run_script --dry-run
     assert_contains "$OUT" "CPU: 50% busy over 1 s (steal 0%, iowait 0%)"
@@ -313,7 +313,7 @@ test_cpu_average_over_a_long_interval() {
 }
 
 test_cpu_without_ticks_is_a_problem() {
-    rm "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
+    rm "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat"
     use_sleep_stub 1000 0 500 8000 100 0 0 0   # the counters do not move
     run_script --dry-run
     assert_contains "$OUT" "- CPU: cannot determine (no CPU time counted)"
@@ -328,10 +328,10 @@ test_unreadable_proc_stat_is_a_problem() {
 test_real_run_saves_cpu_sample() {
     run_script
     assert_rc 0
-    assert_contains "$ROOT_DIR/var/lib/hc-monitor/cpu.stat" " 9600 8000 100 0"
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat" " 9600 8000 100 0"
 }
 
 test_dry_run_keeps_cpu_sample() {
     run_script --dry-run
-    assert_contains "$ROOT_DIR/var/lib/hc-monitor/cpu.stat" " 8600 7250 100 0"
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat" " 8600 7250 100 0"
 }

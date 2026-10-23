@@ -102,8 +102,8 @@ test_service_file_errors() {
     run_script --dry-run
     assert_rc 0
     assert_contains "$OUT" "- Service a-empty: nothing to check (set SERVICES, PORTS, CERTS or HTTP_URL)"
-    assert_contains "$OUT" "- Service b-broken: cannot load /root/.healthchecks/b-broken/.env"
-    assert_contains "$OUT" "- Service c-unset: cannot load /root/.healthchecks/c-unset/.env"
+    assert_contains "$OUT" "- Service b-broken: cannot load /root/.healthchecks/hc-monitor/services/b-broken/.env"
+    assert_contains "$OUT" "- Service c-unset: cannot load /root/.healthchecks/hc-monitor/services/c-unset/.env"
     assert_contains "$OUT" "- Service d-expect: HTTP_EXPECT is set without HTTP_URL"
     assert_contains "$OUT" "- Service e-regex: invalid HTTP_EXPECT (not a regular expression)"
     assert_contains "$OUT" "- Service f-same: HC_PING_URL is the server's ping URL (create a separate check)"
@@ -113,12 +113,12 @@ test_service_file_errors() {
 
 test_unsafe_service_file_is_not_loaded() {
     add_service open "touch '$T/sourced'" 'PORTS="22"'
-    chmod 666 "$ROOT_DIR/root/.healthchecks/open/.env"
+    chmod 666 "$ROOT_DIR/root/.healthchecks/hc-monitor/services/open/.env"
     add_service opendir 'PORTS="22"'
-    chmod 777 "$ROOT_DIR/root/.healthchecks/opendir"
+    chmod 777 "$ROOT_DIR/root/.healthchecks/hc-monitor/services/opendir"
     run_script --dry-run
-    assert_contains "$OUT" "- Service open: unsafe permissions on /root/.healthchecks/open/.env (it must be owned by root and not writable by group or others)"
-    assert_contains "$OUT" "- Service opendir: unsafe permissions on /root/.healthchecks/opendir (it must be owned by root and not writable by group or others)"
+    assert_contains "$OUT" "- Service open: unsafe permissions on /root/.healthchecks/hc-monitor/services/open/.env (it must be owned by root and not writable by group or others)"
+    assert_contains "$OUT" "- Service opendir: unsafe permissions on /root/.healthchecks/hc-monitor/services/opendir (it must be owned by root and not writable by group or others)"
     [[ ! -e $T/sourced ]] || fail "a file with unsafe permissions was sourced"
 }
 
@@ -157,7 +157,7 @@ test_dry_run_prints_every_report() {
 }
 
 test_directory_without_env_is_ignored() {
-    mkdir -p "$ROOT_DIR/root/.healthchecks/notes"
+    mkdir -p "$ROOT_DIR/root/.healthchecks/hc-monitor/services/notes"
     run_script --dry-run
     assert_contains "$OUT" "All good"
     assert_not_contains "$OUT" "notes"
@@ -176,8 +176,8 @@ test_add_creates_service_file() {
     INPUT="http://127.0.0.1:$SERVER_PORT/svc-uuid/"$'\nnym-node\n1789\n'"$cert"$'\n'"http://127.0.0.1:$SERVER_PORT/health"$'\n"status" *: *"up"'
     run_script add nym
     assert_rc 0
-    local dir="$ROOT_DIR/root/.healthchecks/nym"
-    assert_mode "$ROOT_DIR/root/.healthchecks" 700
+    local dir="$ROOT_DIR/root/.healthchecks/hc-monitor/services/nym"
+    assert_mode "$ROOT_DIR/root/.healthchecks/hc-monitor/services" 700
     assert_mode "$dir" 700
     assert_mode "$dir/.env" 600
     assert_contains "$dir/.env" "HC_PING_URL='http://127.0.0.1:$SERVER_PORT/svc-uuid'"
@@ -202,7 +202,7 @@ test_add_again_keeps_values() {
     INPUT=$'\n\n\n\n\n'
     run_script add nym
     assert_rc 0
-    local env="$ROOT_DIR/root/.healthchecks/nym/.env"
+    local env="$ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env"
     assert_contains "$env" "HC_PING_URL='http://127.0.0.1:1/svc'"
     assert_contains "$env" "SERVICES='cron'"
     assert_contains "$env" "PORTS='22'"
@@ -230,8 +230,8 @@ test_add_requires_something_to_check() {
     run_script add nym
     assert_rc 0
     assert_contains "$ERR" "Nothing to check: set at least one service, port, certificate or health check URL."
-    assert_contains "$ROOT_DIR/root/.healthchecks/nym/.env" "SERVICES='cron'"
-    assert_contains "$ROOT_DIR/root/.healthchecks/nym/.env" "PORTS=''"
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env" "SERVICES='cron'"
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env" "PORTS=''"
 }
 
 test_add_rejects_invalid_answers() {
@@ -242,8 +242,8 @@ test_add_rejects_invalid_answers() {
     [[ $(grep -c "of a separate check (not the server's)" "$ERR") == 2 ]] ||
         fail "the server's URL and ftp:// must both be rejected: $(cat "$ERR")"
     assert_contains "$ERR" "Expected a single-line regular expression"
-    assert_contains "$ROOT_DIR/root/.healthchecks/nym/.env" "HC_PING_URL='http://127.0.0.1:1/svc'"
-    assert_contains "$ROOT_DIR/root/.healthchecks/nym/.env" "HTTP_EXPECT='up'"
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env" "HC_PING_URL='http://127.0.0.1:1/svc'"
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env" "HTTP_EXPECT='up'"
 }
 
 test_add_and_remove_check_the_name() {
@@ -263,11 +263,11 @@ test_remove_service() {
     run_script remove nym
     assert_rc 0
     assert_contains "$OUT" "Cancelled."
-    [[ -e $ROOT_DIR/root/.healthchecks/nym/.env ]] || fail "the service was removed although the answer was n"
+    [[ -e $ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env ]] || fail "the service was removed although the answer was n"
     INPUT=$'y\n'
     run_script remove nym
     assert_rc 0
-    [[ ! -e $ROOT_DIR/root/.healthchecks/nym ]] || fail "the service directory is still there"
+    [[ ! -e $ROOT_DIR/root/.healthchecks/hc-monitor/services/nym ]] || fail "the service directory is still there"
     assert_contains "$OUT" "Service nym removed."
     assert_contains "$OUT" "pause or delete it in healthchecks.io"
 }
@@ -286,6 +286,6 @@ test_uninstall_keeps_service_files() {
     INPUT=$'y\n'
     run_script uninstall
     assert_rc 0
-    [[ -e $ROOT_DIR/root/.healthchecks/nym/.env ]] || fail "uninstall removed a service file"
-    assert_contains "$OUT" "Service files in /root/.healthchecks were kept (nym)"
+    [[ -e $ROOT_DIR/root/.healthchecks/hc-monitor/services/nym/.env ]] || fail "uninstall removed a service file"
+    assert_contains "$OUT" "Service files in /root/.healthchecks/hc-monitor/services were kept (nym)"
 }

@@ -126,7 +126,7 @@ sudo hc-monitor.sh add nym-gateway      # asks for the settings; run it again to
 sudo hc-monitor.sh remove nym-gateway
 ```
 
-The settings are stored in `/root/.healthchecks/<name>/.env`, and you can write the file by hand too:
+The settings are stored in `/root/.healthchecks/hc-monitor/services/<name>/.env`, and you can write the file by hand too:
 
 ```bash
 HC_PING_URL="https://hc-ping.com/<uuid>"        # the service's own check; empty: report with the server
@@ -180,21 +180,28 @@ sudo bash hc-monitor.sh install
 
 `install` replaces the installed copy and offers your current settings as defaults — press Enter to keep them. It then sends a fresh report and keeps the timer on. If you downloaded the single file with `curl`, download it again the same way and re-run `install`.
 
+Earlier versions kept the files elsewhere: the script in `/usr/local/bin`, the settings in `/etc/hc-monitor.conf`, the state in `/var/lib/hc-monitor` and service files in `/root/.healthchecks/<name>/.env`. `install` offers the old settings as defaults and moves the rest to `/root/.healthchecks/hc-monitor/`. A `.env` there that doesn't look like an hc-monitor service file (no `# hc-monitor service` header and none of its settings) is left in place and listed. The old files are removed only once the new ones are written, so an aborted install leaves the old version running.
+
 ## Installed files
 
 | Path | Mode | Contents |
 |---|---|---|
-| `/usr/local/bin/hc-monitor.sh` | 700 | the script |
-| `/etc/hc-monitor.conf` | 600 | settings |
+Everything except the units lives in `/root/.healthchecks/hc-monitor/` (mode 700; other tools may keep their own folders in `/root/.healthchecks`):
+
+| Path | Mode | Contents |
+|---|---|---|
+| `/root/.healthchecks/hc-monitor/hc-monitor.sh` | 700 | the script |
+| `/usr/local/bin/hc-monitor.sh` | link | to the script, so `sudo hc-monitor.sh` works |
+| `/root/.healthchecks/hc-monitor/hc-monitor.conf` | 600 | settings |
+| `/root/.healthchecks/hc-monitor/state/cpu.stat` | 644 | CPU counters from the previous run, for the average |
+| `/root/.healthchecks/hc-monitor/state/restarts.state` | 644 | restart counts of the watched units from the previous run |
+| `/root/.healthchecks/hc-monitor/state/oom.state` | 644 | the OOM kill count from the previous run |
+| `/root/.healthchecks/hc-monitor/state/confirm.state` | 644 | how many runs in a row each current problem has been seen |
+| `/root/.healthchecks/hc-monitor/services/<name>/.env` | 600 | settings of a service, written by `add` (kept by `uninstall`) |
 | `/etc/systemd/system/hc-monitor.service` | 644 | oneshot unit that runs the script |
 | `/etc/systemd/system/hc-monitor.timer` | 644 | runs the unit every `INTERVAL` minutes (`OnCalendar=*:0/5` for 5) |
-| `/var/lib/hc-monitor/cpu.stat` | 644 | CPU counters from the previous run, for the average |
-| `/var/lib/hc-monitor/restarts.state` | 644 | restart counts of the watched units from the previous run |
-| `/var/lib/hc-monitor/oom.state` | 644 | the OOM kill count from the previous run |
-| `/var/lib/hc-monitor/confirm.state` | 644 | how many runs in a row each current problem has been seen |
-| `/root/.healthchecks/<name>/.env` | 600 | settings of a service, written by `add` (kept by `uninstall`) |
 
-`/etc/hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits — except `INTERVAL`: the schedule lives in the timer, so change it with `sudo hc-monitor.sh install`, which rewrites and restarts the timer.
+`hc-monitor.conf` is a plain shell file, and the next run picks up any manual edits — except `INTERVAL`: the schedule lives in the timer, so change it with `sudo hc-monitor.sh install`, which rewrites and restarts the timer.
 
 ```bash
 HC_PING_URL="https://hc-ping.com/<uuid>"

@@ -6,7 +6,7 @@
 #     sudo bash hc-monitor.sh install
 # Afterwards:
 #     sudo hc-monitor.sh --dry-run         show the reports without sending them
-#     sudo hc-monitor.sh add <name>        add or change a service: ~/.healthchecks/<name>/.env
+#     sudo hc-monitor.sh add <name>        add or change a service: ~/.healthchecks/hc-monitor/services/<name>/.env
 #     sudo hc-monitor.sh remove <name>     remove a service
 #     sudo hc-monitor.sh install           reconfigure (also to change how often it checks)
 #     sudo hc-monitor.sh uninstall         remove hc-monitor
@@ -28,38 +28,51 @@ fi
 set -uo pipefail
 export LC_ALL=C
 
-readonly INSTALLED_PATH="/usr/local/bin/hc-monitor.sh"
+readonly INSTALLED_PATH="/usr/local/bin/hc-monitor.sh"   # a link to SCRIPT_PATH
 
 # HC_MONITOR_ROOT is for tests only: a prefix for every system path.
 readonly ROOT="${HC_MONITOR_ROOT:-}"
-readonly CONF_FILE="$ROOT/etc/hc-monitor.conf"
-readonly BIN_FILE="$ROOT$INSTALLED_PATH"
+
+# The script, settings, state and service files live in root's home: the timer runs as root, and
+# systemd doesn't set $HOME.
+root_home=$(getent passwd 0 2> /dev/null)
+root_home=${root_home#*:*:*:*:*:}
+root_home=${root_home%%:*}
+readonly ROOT_HOME=${root_home:-/root}
+unset root_home
+readonly HEALTHCHECKS_DIR="$ROOT$ROOT_HOME/.healthchecks"   # other tools may keep their folders here too
+readonly APP_DIR="$HEALTHCHECKS_DIR/hc-monitor"
+readonly SCRIPT_PATH="$ROOT_HOME/.healthchecks/hc-monitor/hc-monitor.sh"
+readonly SCRIPT_FILE="$ROOT$SCRIPT_PATH"
+readonly LINK_FILE="$ROOT$INSTALLED_PATH"
+readonly CONF_FILE="$APP_DIR/hc-monitor.conf"
+readonly SERVICES_DIR="$APP_DIR/services"
+readonly STATE_DIR="$APP_DIR/state"
+readonly CPU_STATE="$STATE_DIR/cpu.stat"
+readonly RESTARTS_STATE="$STATE_DIR/restarts.state"
+readonly OOM_STATE="$STATE_DIR/oom.state"
+readonly CONFIRM_STATE="$STATE_DIR/confirm.state"
+readonly STATE_FILES="cpu.stat restarts.state oom.state confirm.state"
+
+# Where earlier versions kept the settings and the state (service files were in HEALTHCHECKS_DIR);
+# install moves them.
+readonly OLD_CONF_FILE="$ROOT/etc/hc-monitor.conf"
+readonly OLD_STATE_DIR="$ROOT/var/lib/hc-monitor"
+
 readonly UNIT_DIR="$ROOT/etc/systemd/system"
 readonly MEMINFO="$ROOT/proc/meminfo"
 readonly LOADAVG="$ROOT/proc/loadavg"
 readonly PROC_NET="$ROOT/proc/net"
 readonly PROC_STAT="$ROOT/proc/stat"
-readonly STATE_DIR="$ROOT/var/lib/hc-monitor"
-readonly CPU_STATE="$STATE_DIR/cpu.stat"
-readonly RESTARTS_STATE="$STATE_DIR/restarts.state"
-readonly OOM_STATE="$STATE_DIR/oom.state"
-readonly CONFIRM_STATE="$STATE_DIR/confirm.state"
 readonly VMSTAT="$ROOT/proc/vmstat"
 readonly CGROUP_DIR="$ROOT/sys/fs/cgroup"
-
-# Service files live in root's home: the timer runs as root, and systemd doesn't set $HOME.
-root_home=$(getent passwd 0 2> /dev/null)
-root_home=${root_home#*:*:*:*:*:}
-root_home=${root_home%%:*}
-readonly SERVICES_DIR="$ROOT${root_home:-/root}/.healthchecks"
-unset root_home
 
 readonly IGNORED_FS=" tmpfs devtmpfs squashfs overlay iso9660 "
 readonly DF_TIMEOUT=10
 readonly HTTP_TIMEOUT=10
 readonly TLS_TIMEOUT=15
 
-# Defaults; /etc/hc-monitor.conf overrides them.
+# Defaults; ~/.healthchecks/hc-monitor/hc-monitor.conf overrides them.
 HC_PING_URL=""
 INTERVAL=5   # minutes between runs; the timer is written by install
 SERVICES=""
@@ -205,11 +218,13 @@ valid_regex() {
     (( $? != 2 ))
 }
 
+# load_config [file]: sources the settings from the file (CONF_FILE by default), if it exists.
 load_config() {
-    [[ -e $CONF_FILE ]] || return 0
-    [[ -r $CONF_FILE ]] || die 2 "cannot read $CONF_FILE, run with sudo"
+    local conf=${1:-$CONF_FILE}
+    [[ -e $conf ]] || return 0
+    [[ -r $conf ]] || die 2 "cannot read $conf, run with sudo"
     # shellcheck source=/dev/null
-    source "$CONF_FILE" || die 2 "cannot load $CONF_FILE"
+    source "$conf" || die 2 "cannot load $conf"
     trim_slashes HC_PING_URL
 }
 
@@ -766,7 +781,7 @@ list_services() {
 load_service() {
     local file="$SERVICES_DIR/$1/.env" path
     HC_PING_URL="" SERVICES="" PORTS="" CERTS="" HTTP_URL="" HTTP_EXPECT=""
-    for path in "$SERVICES_DIR" "$SERVICES_DIR/$1" "$file"; do
+    for path in "$HEALTHCHECKS_DIR" "$APP_DIR" "$SERVICES_DIR" "$SERVICES_DIR/$1" "$file"; do
         if ! safe_path "$path"; then
             SERVICE_ERROR="unsafe permissions on ${path#"$ROOT"} (it must be owned by root and not writable by group or others)"
             return 1
@@ -1259,9 +1274,16 @@ ask_settings() {
     fi
 }
 
+# make_dirs <dir>...: creates the directories under APP_DIR; they, APP_DIR and HEALTHCHECKS_DIR
+# get mode 700.
+make_dirs() {
+    local last=${*: -1}
+    { mkdir -p "$@" && chmod 700 "$HEALTHCHECKS_DIR" "$APP_DIR" "$@"; } || die 1 "cannot create ${last#"$ROOT"}"
+}
+
 write_config() {
     local tmp
-    mkdir -p "${CONF_FILE%/*}" || die 1 "cannot create the directory for $CONF_FILE"
+    make_dirs "$APP_DIR"
     tmp=$(mktemp "$CONF_FILE.XXXXXX") || die 1 "cannot create a temporary file next to $CONF_FILE"
     if ! cat > "$tmp" <<EOF
 # hc-monitor settings. Change them with: sudo $INSTALLED_PATH install (or edit this file).
@@ -1290,12 +1312,17 @@ write_unit() {
     { cat > "$1" && chmod 644 "$1"; } || die 1 "cannot write $1"
 }
 
+# install_files: the script in APP_DIR, the command linked to it, and the units.
 install_files() {
     local self
     self=$(readlink -f "${BASH_SOURCE[0]}")
-    if [[ $self != "$(readlink -f "$BIN_FILE")" ]]; then
-        install -D -m 700 "$self" "$BIN_FILE" || die 1 "cannot copy the script to $BIN_FILE"
+    if [[ $self != "$(readlink -f "$SCRIPT_FILE")" ]]; then
+        # install replaces the file instead of writing into it: a running copy reads on unharmed.
+        install -m 700 "$self" "$SCRIPT_FILE" || die 1 "cannot copy the script to $SCRIPT_FILE"
     fi
+    # An earlier version's copy may be there, the very script running now: ln replaces it the same way.
+    { mkdir -p "${LINK_FILE%/*}" && ln -sfn "$SCRIPT_PATH" "$LINK_FILE"; } ||
+        die 1 "cannot link $LINK_FILE to $SCRIPT_PATH"
     mkdir -p "$UNIT_DIR" || die 1 "cannot create $UNIT_DIR"
     write_unit "$UNIT_DIR/hc-monitor.service" <<EOF
 [Unit]
@@ -1305,7 +1332,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$INSTALLED_PATH
+ExecStart=$SCRIPT_PATH
 TimeoutStartSec=4min
 EOF
     write_unit "$UNIT_DIR/hc-monitor.timer" <<EOF
@@ -1382,12 +1409,57 @@ cmd_install() {
     done
     ensure_curl
     load_config
+    [[ -e $CONF_FILE ]] || load_config "$OLD_CONF_FILE"
     ask_settings
     write_config
     install_files
+    move_old_layout
     first_report
     enable_timer
     print_done
+}
+
+# hc_service_file <file>: the file looks like an hc-monitor service file: written by add, or by hand
+# with its settings.
+hc_service_file() {
+    grep -qE '^(# hc-monitor service |(HC_PING_URL|SERVICES|PORTS|CERTS|HTTP_URL)=)' -- "$1" 2> /dev/null
+}
+
+# move_old_layout: moves what earlier versions kept elsewhere into APP_DIR: the state from
+# /var/lib/hc-monitor and the service files from ~/.healthchecks/<name>/.env; then removes
+# /etc/hc-monitor.conf, whose settings write_config has saved. Runs once the new files are in
+# place, so an aborted install leaves the old layout working.
+move_old_layout() {
+    local name file dir
+    if [[ -d $OLD_STATE_DIR ]]; then
+        make_dirs "$STATE_DIR"
+        for name in $STATE_FILES; do
+            file="$OLD_STATE_DIR/$name"
+            [[ -e $file ]] || continue
+            # A run of the new script may have saved its own state already; that one is newer.
+            if [[ -e $STATE_DIR/$name ]]; then rm -f "$file"; else mv -f "$file" "$STATE_DIR/"; fi
+            rm -f "$file.tmp"
+        done
+        rmdir "$OLD_STATE_DIR" 2> /dev/null
+    fi
+    # The settings go last, so an install that stops halfway moves the rest when run again.
+    [[ -e $OLD_CONF_FILE ]] || return 0
+    for file in "$HEALTHCHECKS_DIR"/*/.env; do
+        [[ -f $file ]] || continue
+        dir=${file%/.env}
+        name=${dir##*/}
+        if ! valid_service_name "$name" || ! hc_service_file "$file"; then
+            echo "Left in place (not an hc-monitor service file): ${file#"$ROOT"}" >&2
+        elif [[ -e $SERVICES_DIR/$name/.env ]]; then
+            echo "Left in place (service $name already exists): ${file#"$ROOT"}" >&2
+        else
+            make_dirs "$SERVICES_DIR" "$SERVICES_DIR/$name"
+            mv -f "$file" "$SERVICES_DIR/$name/.env" || die 1 "cannot move ${file#"$ROOT"} to ${SERVICES_DIR#"$ROOT"}/$name"
+            rmdir "$dir" 2> /dev/null
+            echo "Moved service $name to ${SERVICES_DIR#"$ROOT"}/$name/.env" >&2
+        fi
+    done
+    rm -f "$OLD_CONF_FILE"
 }
 
 cmd_uninstall() {
@@ -1400,8 +1472,9 @@ cmd_uninstall() {
     rm -f "$UNIT_DIR/hc-monitor.service" "$UNIT_DIR/hc-monitor.timer"
     systemctl daemon-reload 2> /dev/null
     systemctl reset-failed hc-monitor.service 2> /dev/null
-    rm -f "$CONF_FILE" "$BIN_FILE" "$CPU_STATE" "$RESTARTS_STATE" "$OOM_STATE" "$CONFIRM_STATE"
-    rmdir "$STATE_DIR" 2> /dev/null
+    [[ ! -L $LINK_FILE ]] || rm -f "$LINK_FILE"
+    rm -f "$CONF_FILE" "$SCRIPT_FILE" "$CPU_STATE" "$RESTARTS_STATE" "$OOM_STATE" "$CONFIRM_STATE"
+    rmdir "$STATE_DIR" "$APP_DIR" "$HEALTHCHECKS_DIR" 2> /dev/null   # only the empty ones go
     echo "hc-monitor removed."
     echo "Pings have stopped: pause or delete the check in healthchecks.io, otherwise it will report the server as down."
     list_services
@@ -1432,7 +1505,7 @@ shell_quote() {
 # saves SERVICES_DIR/<name>/.env (directories 700, file 600).
 write_service_file() {
     local dir="$SERVICES_DIR/$1" tmp
-    { mkdir -p "$dir" && chmod 700 "$SERVICES_DIR" "$dir"; } || die 1 "cannot create ${dir#"$ROOT"}"
+    make_dirs "$SERVICES_DIR" "$dir"
     tmp=$(mktemp "$dir/.env.XXXXXX") || die 1 "cannot create a temporary file in ${dir#"$ROOT"}"
     if ! {
         echo "# hc-monitor service \"$1\". Change it with: sudo $INSTALLED_PATH add $1 (or edit this file)."

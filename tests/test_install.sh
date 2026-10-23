@@ -5,7 +5,7 @@
 test_install_fresh() {
     local cert
     cert="localhost:$(tls_port good)"
-    rm "$ROOT_DIR/etc/hc-monitor.conf"
+    rm "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     printf 'nginx active\n' > "$STUB_DIR/services"
     set_listen tcp 22
     set_listen udp 53
@@ -13,7 +13,7 @@ test_install_fresh() {
     INPUT=$'https://hc-ping.com/new-check\n\nnginx\n22 53/udp\n'"$cert"$'\n'
     run_script install
     assert_rc 0
-    local conf="$ROOT_DIR/etc/hc-monitor.conf" units="$ROOT_DIR/etc/systemd/system"
+    local conf="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" units="$ROOT_DIR/etc/systemd/system"
     assert_mode "$conf" 600
     assert_contains "$conf" 'HC_PING_URL="https://hc-ping.com/new-check"'
     assert_contains "$conf" 'INTERVAL="5"'
@@ -31,12 +31,16 @@ test_install_fresh() {
         fail "no load threshold line: $(cat "$ERR")"
     grep -qE '^  A problem alerts after: +2 runs in a row$' "$ERR" || fail "no confirmation line: $(cat "$ERR")"
     assert_contains "$OUT" "TLS $cert: valid until"
-    assert_mode "$ROOT_DIR/usr/local/bin/hc-monitor.sh" 700
-    cmp -s "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh" || fail "the installed copy differs from the original"
+    assert_mode "$ROOT_DIR/root/.healthchecks" 700
+    assert_mode "$ROOT_DIR/root/.healthchecks/hc-monitor" 700
+    assert_mode "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.sh" 700
+    cmp -s "$SCRIPT" "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.sh" || fail "the installed copy differs from the original"
+    [[ $(readlink "$ROOT_DIR/usr/local/bin/hc-monitor.sh") == /root/.healthchecks/hc-monitor/hc-monitor.sh ]] ||
+        fail "the command must link to the script: $(readlink "$ROOT_DIR/usr/local/bin/hc-monitor.sh")"
     assert_mode "$units/hc-monitor.service" 644
     assert_mode "$units/hc-monitor.timer" 644
     assert_contains "$units/hc-monitor.service" "Type=oneshot"
-    assert_contains "$units/hc-monitor.service" "ExecStart=/usr/local/bin/hc-monitor.sh"
+    assert_contains "$units/hc-monitor.service" "ExecStart=/root/.healthchecks/hc-monitor/hc-monitor.sh"
     assert_contains "$units/hc-monitor.service" "TimeoutStartSec=4min"
     assert_contains "$units/hc-monitor.timer" "OnCalendar=*:0/5"
     assert_contains "$units/hc-monitor.timer" "AccuracySec=5s"
@@ -60,7 +64,7 @@ test_install_every_minute() {
     assert_rc 0
     [[ $(grep -c "Expected one of 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60." "$ERR") == 2 ]] ||
         fail "7 and 0 must both be rejected: $(cat "$ERR")"
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'INTERVAL="1"'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'INTERVAL="1"'
     assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "OnCalendar=*:0/1"
     assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "Description=Run hc-monitor every minute"
     assert_contains "$OUT" "Done: a report goes to healthchecks.io every minute."
@@ -71,20 +75,20 @@ test_install_hourly() {
     INPUT=$'\n60\n\n\n\n'
     run_script install
     assert_rc 0
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'INTERVAL="60"'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'INTERVAL="60"'
     assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "OnCalendar=*:00"
     assert_not_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "*:0/"
     assert_contains "$OUT" "Period: 60 minutes, Grace Time: 120 minutes"
 }
 
 test_install_requires_url_when_none_is_configured() {
-    rm "$ROOT_DIR/etc/hc-monitor.conf"
+    rm "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     INPUT=$'\nhttps://hc-ping.com/new-check\n\n\n\n\n'   # Enter without a URL must ask again
     run_script install
     assert_rc 0
     [[ $(grep -c "Expected a URL like https://hc-ping.com/<uuid>" "$ERR") == 1 ]] ||
         fail "an empty URL must be rejected exactly once"
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'HC_PING_URL="https://hc-ping.com/new-check"'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'HC_PING_URL="https://hc-ping.com/new-check"'
 }
 
 test_install_reprompts_bad_url_and_unknown_service() {
@@ -95,8 +99,8 @@ test_install_reprompts_bad_url_and_unknown_service() {
     [[ $(grep -c "Expected a URL like https://hc-ping.com/<uuid>" "$ERR") == 2 ]] ||
         fail "the URL hint must be shown twice (ftp and the quote)"
     assert_contains "$ERR" "Service ngnix not found."
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'HC_PING_URL="http://127.0.0.1:1/new-uuid"'
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'SERVICES="nginx"'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'HC_PING_URL="http://127.0.0.1:1/new-uuid"'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'SERVICES="nginx"'
 }
 
 test_install_changes_thresholds() {
@@ -113,7 +117,7 @@ test_install_changes_thresholds() {
     assert_contains "$ERR" "The threshold is per CPU core: 2 means an alert at load 8 on this server."
     assert_contains "$ERR" "Expected a whole number of days from 1 to 365."
     assert_contains "$ERR" "Expected a whole number from 1 to 10."
-    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    local conf="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     assert_contains "$conf" 'DISK_MAX_PCT="85"'
     assert_contains "$conf" 'MEM_MAX_PCT="80"'
     assert_contains "$conf" 'LOAD_MAX_PER_CPU="1.5"'
@@ -127,7 +131,7 @@ test_install_skips_certificate_threshold_without_certificates() {
     INPUT=$'\n\n\n\n\ny\n\n\n\n\n3'   # no certificates: the number of runs comes right after CPU
     run_script install
     assert_rc 0
-    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    local conf="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     assert_contains "$conf" 'CERTS=""'
     assert_contains "$conf" 'CERT_MIN_DAYS="21"'
     assert_contains "$conf" 'CONFIRM_RUNS="3"'
@@ -139,7 +143,7 @@ test_install_turns_checks_off() {
     INPUT=$'\n\n\n\n\ny\n0\n0\n0\n0\n\n'   # thresholds: disk, RAM, load and CPU 0; the rest: Enter
     run_script install
     assert_rc 0
-    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    local conf="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     assert_contains "$conf" '# 0 turns the disk, RAM, load or CPU check off.'
     assert_contains "$conf" 'DISK_MAX_PCT="0"'
     assert_contains "$conf" 'MEM_MAX_PCT="0"'
@@ -175,7 +179,7 @@ test_reinstall_keeps_current_values() {
     INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
-    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    local conf="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     assert_contains "$conf" 'HC_PING_URL="http://127.0.0.1:1/keep"'
     assert_contains "$conf" 'INTERVAL="10"'
     assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.timer" "OnCalendar=*:0/10"
@@ -194,11 +198,11 @@ test_upgrade_from_config_without_new_keys() {
     # A config written before PORTS, CERTS, CPU_MAX_PCT, CERT_MIN_DAYS and CONFIRM_RUNS existed
     # (written directly: write_conf would add CONFIRM_RUNS).
     printf '%s\n' 'HC_PING_URL="http://127.0.0.1:1/old"' 'SERVICES=""' 'DISK_MAX_PCT="70"' 'MEM_MAX_PCT="75"' \
-        > "$ROOT_DIR/etc/hc-monitor.conf"
+        > "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
-    local conf="$ROOT_DIR/etc/hc-monitor.conf"
+    local conf="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
     assert_contains "$conf" 'PORTS=""'
     assert_contains "$conf" 'CERTS=""'
     assert_contains "$conf" 'CPU_MAX_PCT="90"'
@@ -215,7 +219,7 @@ test_install_rejects_invalid_certificates() {
     [[ $(grep -c "^Invalid certificate entry: " "$ERR") == 2 ]] ||
         fail "both invalid entries must be reported: $(cat "$ERR")"
     assert_contains "$ERR" "Invalid certificate entry: https://example.com (expected a host name, e.g. example.com or example.com:9001)."
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'CERTS=""'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'CERTS=""'
 }
 
 test_install_dash_clears_services() {
@@ -224,7 +228,7 @@ test_install_dash_clears_services() {
     INPUT=$'\n\n-\n\n\n'
     run_script install
     assert_rc 0
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'SERVICES=""'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'SERVICES=""'
 }
 
 test_install_rejects_invalid_ports() {
@@ -233,7 +237,7 @@ test_install_rejects_invalid_ports() {
     assert_rc 0
     [[ $(grep -c "^Invalid port: " "$ERR") == 6 ]] || fail "all six invalid entries must be reported"
     assert_contains "$ERR" "Invalid port: db.local:5432 (expected 443, 443/tcp or 53/udp)."
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'PORTS="22 53/udp 65535"'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'PORTS="22 53/udp 65535"'
 }
 
 test_install_dash_clears_ports() {
@@ -241,17 +245,73 @@ test_install_dash_clears_ports() {
     INPUT=$'\n\n\n-\n\n'
     run_script install
     assert_rc 0
-    assert_contains "$ROOT_DIR/etc/hc-monitor.conf" 'PORTS=""'
+    assert_contains "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf" 'PORTS=""'
 }
 
 test_install_from_installed_copy() {
-    mkdir -p "$ROOT_DIR/usr/local/bin"
-    cp "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh"
-    RUN_SCRIPT="$ROOT_DIR/usr/local/bin/hc-monitor.sh"
+    cp "$SCRIPT" "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.sh"
+    RUN_SCRIPT="$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.sh"
     INPUT=$'\n\n\n\n\n'
     run_script install
     assert_rc 0
-    cmp -s "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh" || fail "the installed copy got corrupted"
+    cmp -s "$SCRIPT" "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.sh" || fail "the installed copy got corrupted"
+}
+
+# old_layout: hc-monitor as versions before /root/.healthchecks/hc-monitor installed it: the script
+# in /usr/local/bin, the settings in /etc, the state in /var/lib, services in /root/.healthchecks.
+old_layout() {
+    rm -rf "$ROOT_DIR/root/.healthchecks/hc-monitor"
+    mkdir -p "$ROOT_DIR/usr/local/bin" "$ROOT_DIR/var/lib/hc-monitor" "$ROOT_DIR/root/.healthchecks/nym" \
+        "$ROOT_DIR/root/.healthchecks/other" "$ROOT_DIR/root/.healthchecks/auth-alerts"
+    cp "$SCRIPT" "$ROOT_DIR/usr/local/bin/hc-monitor.sh"
+    printf '%s\n' 'HC_PING_URL="http://127.0.0.1:1/old-check"' 'INTERVAL="10"' 'SERVICES=""' 'DISK_MAX_PCT="70"' \
+        > "$ROOT_DIR/etc/hc-monitor.conf"
+    echo "1000000000 10 5 0 0" > "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
+    printf '.\tnginx\t3\n' > "$ROOT_DIR/var/lib/hc-monitor/restarts.state"
+    printf '%s\n' "# hc-monitor service \"nym\". Change it with: sudo /usr/local/bin/hc-monitor.sh add nym" \
+        "PORTS='22'" > "$ROOT_DIR/root/.healthchecks/nym/.env"
+    chmod 600 "$ROOT_DIR/root/.healthchecks/nym/.env"
+    echo "SOME_OTHER_TOOL=1" > "$ROOT_DIR/root/.healthchecks/other/.env"
+    echo "TG_CHAT_ID='1'" > "$ROOT_DIR/root/.healthchecks/auth-alerts/auth-alerts.conf"
+    RUN_SCRIPT="$ROOT_DIR/usr/local/bin/hc-monitor.sh"
+}
+
+test_upgrade_moves_the_old_layout() {
+    old_layout
+    INPUT=$'\n\n\n\n\n'
+    run_script install
+    assert_rc 0
+    local app="$ROOT_DIR/root/.healthchecks/hc-monitor"
+    assert_contains "$app/hc-monitor.conf" 'HC_PING_URL="http://127.0.0.1:1/old-check"'
+    assert_contains "$app/hc-monitor.conf" 'INTERVAL="10"'
+    assert_contains "$app/hc-monitor.conf" 'DISK_MAX_PCT="70"'
+    [[ ! -e $ROOT_DIR/etc/hc-monitor.conf ]] || fail "/etc/hc-monitor.conf is still there"
+    [[ ! -e $ROOT_DIR/var/lib/hc-monitor ]] || fail "/var/lib/hc-monitor is still there"
+    assert_contains "$app/state/restarts.state" $'.\tnginx\t3'
+    [[ -f $app/state/cpu.stat ]] || fail "the CPU sample was not moved"
+    assert_mode "$app/services/nym/.env" 600
+    assert_contains "$app/services/nym/.env" "PORTS='22'"
+    [[ ! -e $ROOT_DIR/root/.healthchecks/nym ]] || fail "the old service directory is still there"
+    [[ -e $ROOT_DIR/root/.healthchecks/other/.env ]] || fail "another tool's .env was moved"
+    assert_contains "$ERR" "Left in place (not an hc-monitor service file): /root/.healthchecks/other/.env"
+    [[ -e $ROOT_DIR/root/.healthchecks/auth-alerts/auth-alerts.conf ]] || fail "auth-alerts was touched"
+    [[ $(readlink "$ROOT_DIR/usr/local/bin/hc-monitor.sh") == /root/.healthchecks/hc-monitor/hc-monitor.sh ]] ||
+        fail "the old copy must become a link to the script"
+    cmp -s "$SCRIPT" "$app/hc-monitor.sh" || fail "the script was not copied"
+    assert_contains "$ROOT_DIR/etc/systemd/system/hc-monitor.service" "ExecStart=/root/.healthchecks/hc-monitor/hc-monitor.sh"
+    assert_contains "$OUT" "[nym] "   # the moved service is in the first report
+    assert_contains "$ERR" "Moved service nym to /root/.healthchecks/hc-monitor/services/nym/.env"
+}
+
+test_aborted_upgrade_keeps_the_old_layout() {
+    old_layout
+    run_script install   # no answers: input aborted at the first question
+    assert_rc 1
+    [[ -e $ROOT_DIR/etc/hc-monitor.conf ]] || fail "/etc/hc-monitor.conf was removed"
+    [[ -e $ROOT_DIR/var/lib/hc-monitor/cpu.stat ]] || fail "the old state was moved"
+    [[ -e $ROOT_DIR/root/.healthchecks/nym/.env ]] || fail "the old service file was moved"
+    [[ -f $ROOT_DIR/usr/local/bin/hc-monitor.sh && ! -L $ROOT_DIR/usr/local/bin/hc-monitor.sh ]] ||
+        fail "the old script was replaced"
 }
 
 test_install_warns_when_report_has_problems() {
@@ -315,12 +375,14 @@ test_uninstall_yes_removes_everything() {
     run_script uninstall
     assert_rc 0
     local f
-    for f in etc/hc-monitor.conf usr/local/bin/hc-monitor.sh var/lib/hc-monitor/cpu.stat \
-        var/lib/hc-monitor/restarts.state var/lib/hc-monitor/oom.state var/lib/hc-monitor/confirm.state \
+    for f in root/.healthchecks/hc-monitor/hc-monitor.conf root/.healthchecks/hc-monitor/hc-monitor.sh \
+        root/.healthchecks/hc-monitor/state/cpu.stat root/.healthchecks/hc-monitor/state/restarts.state \
+        root/.healthchecks/hc-monitor/state/oom.state root/.healthchecks/hc-monitor/state/confirm.state \
         etc/systemd/system/hc-monitor.service etc/systemd/system/hc-monitor.timer; do
         [[ ! -e $ROOT_DIR/$f ]] || fail "/$f was not removed"
     done
-    [[ ! -d $ROOT_DIR/var/lib/hc-monitor ]] || fail "/var/lib/hc-monitor was not removed"
+    [[ ! -L $ROOT_DIR/usr/local/bin/hc-monitor.sh ]] || fail "the /usr/local/bin link was not removed"
+    [[ ! -d $ROOT_DIR/root/.healthchecks/hc-monitor ]] || fail "/root/.healthchecks/hc-monitor was not removed"
     assert_calls_in_order "systemctl disable --now hc-monitor.timer" "systemctl daemon-reload" \
         "systemctl reset-failed hc-monitor.service"
     assert_contains "$OUT" "pause or delete the check in healthchecks.io"
@@ -333,8 +395,9 @@ test_uninstall_declined_keeps_everything() {
     run_script uninstall
     assert_rc 0
     assert_contains "$OUT" "Cancelled."
-    [[ -e $ROOT_DIR/etc/hc-monitor.conf ]] || fail "the config was removed although the answer was n"
-    [[ -e $ROOT_DIR/usr/local/bin/hc-monitor.sh ]] || fail "the script was removed although the answer was n"
+    [[ -e $ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf ]] || fail "the config was removed although the answer was n"
+    [[ -e $ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.sh ]] || fail "the script was removed although the answer was n"
+    [[ -L $ROOT_DIR/usr/local/bin/hc-monitor.sh ]] || fail "the link was removed although the answer was n"
 }
 
 test_confirm_asks_again_on_unclear_answer() {
@@ -344,5 +407,5 @@ test_confirm_asks_again_on_unclear_answer() {
     run_script uninstall
     assert_rc 0
     assert_contains "$ERR" "Please answer y or n."
-    [[ ! -e $ROOT_DIR/etc/hc-monitor.conf ]] || fail "the config is still there after yes"
+    [[ ! -e $ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf ]] || fail "the config is still there after yes"
 }
