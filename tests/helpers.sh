@@ -155,8 +155,8 @@ set_cpu() {
 set_cpu_state() {
     local now
     printf -v now '%(%s)T' -1
-    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
-    echo "$((now - $1)) $2 $3 $4 $5" > "$ROOT_DIR/var/lib/hc-monitor/cpu.stat"
+    mkdir -p "$ROOT_DIR/root/.healthchecks/hc-monitor/state"
+    echo "$((now - $1)) $2 $3 $4 $5" > "$ROOT_DIR/root/.healthchecks/hc-monitor/state/cpu.stat"
 }
 
 # set_oom_kills <n> — /proc/vmstat with the kernel's count of processes killed by the OOM killer.
@@ -169,8 +169,8 @@ set_oom_kills() {
 set_oom_state() {
     local now
     printf -v now '%(%s)T' -1
-    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
-    echo "$((now - $1)) $2${3:+ $3}" > "$ROOT_DIR/var/lib/hc-monitor/oom.state"
+    mkdir -p "$ROOT_DIR/root/.healthchecks/hc-monitor/state"
+    echo "$((now - $1)) $2${3:+ $3}" > "$ROOT_DIR/root/.healthchecks/hc-monitor/state/oom.state"
 }
 
 # set_cgroup_oom_kills <n> — memory.events of the container's own cgroup (cgroup v2), as a
@@ -189,15 +189,15 @@ oom_group_kill 0
 # add_restarts_state <context> <unit> <count> — a restart count saved by the previous run
 # (context "." is the server, otherwise a service name).
 add_restarts_state() {
-    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
-    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/var/lib/hc-monitor/restarts.state"
+    mkdir -p "$ROOT_DIR/root/.healthchecks/hc-monitor/state"
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/root/.healthchecks/hc-monitor/state/restarts.state"
 }
 
 # add_confirm_state <context> <key> <count> — how many runs in a row the previous run had seen a
 # problem (context "." is the server, otherwise a service name).
 add_confirm_state() {
-    mkdir -p "$ROOT_DIR/var/lib/hc-monitor"
-    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/var/lib/hc-monitor/confirm.state"
+    mkdir -p "$ROOT_DIR/root/.healthchecks/hc-monitor/state"
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ROOT_DIR/root/.healthchecks/hc-monitor/state/confirm.state"
 }
 
 # use_sleep_stub <user nice system idle iowait irq softirq steal> — `sleep` rewrites /proc/stat
@@ -210,15 +210,17 @@ use_sleep_stub() {
 # write_conf <line>... — the main config. Tests see problems at once (CONFIRM_RUNS="1") unless the
 # lines set CONFIRM_RUNS themselves: a later assignment wins.
 write_conf() {
-    printf '%s\n' 'CONFIRM_RUNS="1"' "$@" > "$ROOT_DIR/etc/hc-monitor.conf"
+    mkdir -p "$ROOT_DIR/root/.healthchecks/hc-monitor"
+    chmod 700 "$ROOT_DIR/root/.healthchecks" "$ROOT_DIR/root/.healthchecks/hc-monitor"
+    printf '%s\n' 'CONFIRM_RUNS="1"' "$@" > "$ROOT_DIR/root/.healthchecks/hc-monitor/hc-monitor.conf"
 }
 
-# add_service <name> <line>... — writes <root home>/.healthchecks/<name>/.env (directories 700, file 600).
+# add_service <name> <line>... — writes <root home>/.healthchecks/hc-monitor/services/<name>/.env (directories 700, file 600).
 add_service() {
-    local dir="$ROOT_DIR/root/.healthchecks/$1"
+    local dir="$ROOT_DIR/root/.healthchecks/hc-monitor/services/$1"
     shift
     mkdir -p "$dir"
-    chmod 700 "$ROOT_DIR/root/.healthchecks" "$dir"
+    chmod 700 "$ROOT_DIR/root/.healthchecks/hc-monitor/services" "$dir"
     printf '%s\n' "$@" > "$dir/.env"
     chmod 600 "$dir/.env"
 }
